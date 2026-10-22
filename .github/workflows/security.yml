@@ -17,9 +17,29 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      # gitleaks-action derives "<base>^..<sha>" from the push event. When the pushed history
+      # starts at a root commit (a fresh repo whose first commit is the fork snapshot), that
+      # range is invalid and the scan errors out instead of reporting findings. Run the pinned
+      # binary with an explicit history range; `--all` scans every reachable commit.
+      - name: Install gitleaks 8.24.3
+        run: |
+          set -euo pipefail
+          version=8.24.3
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${version}"
+          curl -sSfL -o /tmp/gitleaks.tar.gz "${base}/gitleaks_${version}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks_checksums.txt "${base}/gitleaks_${version}_checksums.txt"
+          (cd /tmp && grep " gitleaks_${version}_linux_x64.tar.gz$" gitleaks_checksums.txt | sha256sum -c -)
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp gitleaks
+          /tmp/gitleaks version
+      - name: Scan every reachable commit for secrets
+        run: /tmp/gitleaks detect --source . --redact -v --exit-code=2 --report-format=sarif --report-path=gitleaks.sarif --log-opts="--all"
+      - name: Upload scan report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: gitleaks-sarif
+          path: gitleaks.sarif
+          if-no-files-found: ignore
 
   dependencies:
     runs-on: ubuntu-latest
