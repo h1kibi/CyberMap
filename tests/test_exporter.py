@@ -52,7 +52,7 @@ async def test_v2_export_formats_keep_all_rows_and_fields(tmp_path: Path, format
 
 
 @pytest.mark.asyncio
-async def test_xlsx_restores_fofamap_v2_table_style(tmp_path: Path):
+async def test_xlsx_restores_cybermap_v2_table_style(tmp_path: Path):
     destination = tmp_path / "assets.xlsx"
     path, count = await export_pages(two_records(), destination, "xlsx")
     assert count == 2

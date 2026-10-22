@@ -44,7 +44,7 @@ def resolve_nuclei_executable(explicit: str | None = None) -> str | None:
     """Prefer an explicit path, then env, then ./nuclei in cwd/project root, then PATH."""
     if explicit:
         return explicit
-    env = os.environ.get("FOFAMAP_NUCLEI")
+    env = os.environ.get("CYBERMAP_NUCLEI")
     if env:
         env_path = Path(env).expanduser()
         if env_path.is_file():
@@ -317,8 +317,18 @@ class NucleiScanner:
 
     @staticmethod
     def _target(value: str) -> str:
-        parsed = urlparse(value if "://" in value else f"https://{value}")
-        return parsed.geturl()
+        """Normalize one target for Nuclei.
+
+        Values that already carry a port but no scheme are passed through unchanged: the probe
+        engine tries http(s) itself, and prepending `https://` would make a non-web service
+        (SSH/RDP/database port) look like a web target that can never answer.
+        """
+        text = value.strip()
+        if "://" in text:
+            return urlparse(text).geturl()
+        if ":" in text:
+            return text
+        return urlparse(f"https://{text}").geturl()
 
     async def run_plan(
         self,

@@ -6,13 +6,28 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from core.agent import AgentRun
+from core.agent import AgentRun, asset_endpoint_count
+from core.engines import engine_label
 from core.scanner import format_nuclei_summary_markdown, load_nuclei_result
 from utils.cli_ui import normalize_summary_markdown
 
 
 def _safe(value: Any) -> str:
     return str(value or "").replace("\r", " ").replace("\n", " ").replace("|", "\\|")
+
+
+def _label(run: AgentRun) -> str:
+    return engine_label(run.engine)
+
+
+def _engine_failure_lines(run: AgentRun) -> list[str]:
+    """Name every engine that failed so a merged report never hides a coverage gap."""
+    if not run.engine_errors:
+        return []
+    details = "; ".join(
+        f"{engine_label(name)}：{item.get('message') or item.get('code')}" for name, item in run.engine_errors.items()
+    )
+    return [f"- 引擎失败：{details}"]
 
 
 def write_agent_report(
@@ -24,15 +39,30 @@ def write_agent_report(
 ) -> Path:
     destination.parent.mkdir(parents=True, exist_ok=True)
     lines = [
-        "# FofaMap AI 资产侦察报告",
+        "# CyberMap AI 资产侦察报告",
         "",
         f"- 生成时间：{datetime.now().astimezone().isoformat(timespec='seconds')}",
         f"- Run ID：`{run.id}`",
         f"- 状态：`{run.state.value}`",
         f"- 动作：`{run.action.value}`",
         f"- 用户需求：{_safe(run.intent)}",
-        f"- FOFA 查询：`{_safe(run.query)}`",
+        f"- {_label(run)} 查询：`{_safe(run.query)}`",
         f"- 结果数量：{run.result_count:,}",
+        f"- 独立端点（IP:端口）：{asset_endpoint_count(run.assets):,}",
+        *(
+            [
+                f"- 新鲜度过滤：丢弃陈旧 {run.age_filter.get('dropped', 0):,} 条、"
+                f"无时间戳保留 {run.age_filter.get('unknown', 0):,} 条"
+            ]
+            if run.age_filter.get("dropped")
+            else []
+        ),
+        *(
+            [f"- 交叉印证：{run.corroboration.get('multi_engine', 0):,} 条被 ≥2 个引擎同时观测到"]
+            if run.corroboration.get("multi_engine")
+            else []
+        ),
+        *_engine_failure_lines(run),
         "",
         "## 执行过程",
         "",
@@ -47,7 +77,7 @@ def write_agent_report(
                 "",
                 "## 多维查询策略",
                 "",
-                "| # | 来源 | 策略 | 查询目的 | FOFA 查询 | FOFA 总量 | 取样 | 去重新增 |",
+                f"| # | 来源 | 策略 | 查询目的 | {_label(run)} 查询 | {_label(run)} 总量 | 取样 | 去重新增 |",
                 "|---:|---|---|---|---|---:|---:|---:|",
             ]
         )
@@ -141,7 +171,7 @@ def write_agent_report(
             lines.extend(
                 [
                     "",
-                    f"> {run.evidence_counts['hypothesis']:,} 条来自官网域名假设验证；仅证明候选域名在 FOFA 中存在，"
+                    f"> {run.evidence_counts['hypothesis']:,} 条来自官网域名假设验证；仅证明候选域名在 {_label(run)} 中存在，"
                     "仍需结合官网内容、备案或权威来源复核归属。",
                 ]
             )
@@ -190,7 +220,7 @@ def write_agent_report(
     lines.extend(
         [
             "",
-            "> FOFA 指纹代表资产暴露信息，不等同于已确认漏洞。Nuclei 结果也应由授权人员复核。",
+            f"> {_label(run)} 指纹代表资产暴露信息，不等同于已确认漏洞。Nuclei 结果也应由授权人员复核。",
             "",
         ]
     )

@@ -2,7 +2,7 @@
 
 ## Immediate credential action required
 
-Earlier FofaMap 2.0 source archives may contain FOFA and model credentials in `config/settings.yaml`. Assume every committed value is compromised:
+Earlier CyberMap 2.0 source archives may contain FOFA and model credentials in `config/settings.yaml`. Assume every committed value is compromised:
 
 1. Revoke and rotate it in the relevant provider console.
 2. Check FOFA/model usage and access logs for unexpected activity.

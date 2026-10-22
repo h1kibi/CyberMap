@@ -1,4 +1,4 @@
-# Runtime dependency ranges for FofaMap 2.0.1. Use requirements.lock for reproducible CI builds.
+# Runtime dependency ranges for CyberMap 2.0.1. Use requirements.lock for reproducible CI builds.
 fastapi>=0.116,<1
 httpx[http2]>=0.28,<1
 jsonschema>=4.25,<5

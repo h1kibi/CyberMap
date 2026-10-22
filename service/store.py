@@ -12,13 +12,13 @@ from sqlalchemy import create_engine, text
 
 
 class JobStore:
-    def __init__(self, database_url: str = "sqlite:///./fofamap.sqlite3") -> None:
+    def __init__(self, database_url: str = "sqlite:///./cybermap.sqlite3") -> None:
         connect_args = {"check_same_thread": False} if database_url.startswith("sqlite") else {}
         self.engine = create_engine(database_url, connect_args=connect_args, future=True)
         with self.engine.begin() as conn:
             conn.execute(
                 text("""
-                CREATE TABLE IF NOT EXISTS fofamap_jobs (
+                CREATE TABLE IF NOT EXISTS cybermap_jobs (
                     id VARCHAR(64) PRIMARY KEY,
                     kind VARCHAR(32) NOT NULL,
                     status VARCHAR(32) NOT NULL,
@@ -44,7 +44,7 @@ class JobStore:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    "INSERT INTO fofamap_jobs "
+                    "INSERT INTO cybermap_jobs "
                     "(id, kind, status, payload, created_at, updated_at, expires_at, consumed) "
                     "VALUES (:id,:kind,:status,:payload,:created,:updated,:expires,false)"
                 ),
@@ -67,7 +67,7 @@ class JobStore:
         with self.engine.begin() as conn:
             rows = (
                 conn.execute(
-                    text("SELECT id, artifact_path FROM fofamap_jobs WHERE expires_at IS NOT NULL AND expires_at < :now"),
+                    text("SELECT id, artifact_path FROM cybermap_jobs WHERE expires_at IS NOT NULL AND expires_at < :now"),
                     {"now": now},
                 )
                 .mappings()
@@ -84,14 +84,14 @@ class JobStore:
                 except (FileNotFoundError, ValueError):
                     continue
             conn.execute(
-                text("DELETE FROM fofamap_jobs WHERE expires_at IS NOT NULL AND expires_at < :now"),
+                text("DELETE FROM cybermap_jobs WHERE expires_at IS NOT NULL AND expires_at < :now"),
                 {"now": now},
             )
         return len(rows)
 
     def get(self, job_id: str) -> dict[str, Any]:
         with self.engine.connect() as conn:
-            row = conn.execute(text("SELECT * FROM fofamap_jobs WHERE id=:id"), {"id": job_id}).mappings().first()
+            row = conn.execute(text("SELECT * FROM cybermap_jobs WHERE id=:id"), {"id": job_id}).mappings().first()
         if row is None:
             raise KeyError(job_id)
         result = dict(row)
@@ -132,7 +132,7 @@ class JobStore:
         with self.engine.begin() as conn:
             conn.execute(
                 text(
-                    "UPDATE fofamap_jobs SET status=:status,result=:result,error=:error,"
+                    "UPDATE cybermap_jobs SET status=:status,result=:result,error=:error,"
                     "artifact_path=:artifact,updated_at=:updated,consumed=:consumed WHERE id=:id"
                 ),
                 values,

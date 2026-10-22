@@ -72,7 +72,7 @@ class HttpModelProvider:
             try:
                 import keyring
 
-                key = keyring.get_password("fofamap-provider", self.profile.api_key_env) or ""
+                key = keyring.get_password("cybermap-provider", self.profile.api_key_env) or ""
             except Exception:
                 key = ""
         if not key:
@@ -83,7 +83,7 @@ class HttpModelProvider:
             raise ProviderError(
                 f"AI 提供商 {self.name!r} 缺少 API 密钥（{self.profile.api_key_env} 未设置）。",
                 code="model_auth_failed",
-                hint=f"运行 `fofamap init` 重新保存密钥，或设置环境变量 {self.profile.api_key_env}。",
+                hint=f"运行 `cybermap init` 重新保存密钥，或设置环境变量 {self.profile.api_key_env}。",
             )
         return key
 
@@ -110,7 +110,7 @@ class HttpModelProvider:
                 f"无法连接 AI 提供商 {self.name!r}：{exc}",
                 retryable=True,
                 code="model_transport_error",
-                hint="运行 `fofamap init` 检查接口地址，并确认网络、代理和本地模型服务是否可用。",
+                hint="运行 `cybermap init` 检查接口地址，并确认网络、代理和本地模型服务是否可用。",
             ) from exc
         try:
             data = response.json()
@@ -128,12 +128,12 @@ class HttpModelProvider:
                 marker in message_text for marker in ("api key", "apikey", "unauthorized", "authentication failed")
             ):
                 code = "model_auth_failed"
-                hint = "API 密钥无效、过期或无权限。运行 `fofamap init` 重新填写，或更新对应环境变量/系统钥匙串。"
+                hint = "API 密钥无效、过期或无权限。运行 `cybermap init` 重新填写，或更新对应环境变量/系统钥匙串。"
             elif response.status_code == 404 or (
                 "model" in message_text and any(marker in message_text for marker in ("not found", "does not exist", "invalid model"))
             ):
                 code = "model_not_found"
-                hint = "运行 `fofamap init` 检查模型 ID、接口地址和协议；本地模型还需确认服务已经启动。"
+                hint = "运行 `cybermap init` 检查模型 ID、接口地址和协议；本地模型还需确认服务已经启动。"
             elif response.status_code == 429:
                 code = "model_rate_limited"
                 hint = "模型额度或速率已用尽，请检查供应商账户、套餐配额，或稍后重试。"
@@ -282,7 +282,7 @@ class HttpModelProvider:
                 raise ProviderError(
                     f"AI 提供商 {self.name!r} 没有发现可用模型。",
                     code="model_not_found",
-                    hint="运行 `fofamap init` 填写明确的模型 ID，或启动 Ollama/LM Studio 并安装模型。",
+                    hint="运行 `cybermap init` 填写明确的模型 ID，或启动 Ollama/LM Studio 并安装模型。",
                 )
             selected_model = models[0]
         protocol = self.profile.protocol
@@ -300,7 +300,7 @@ class HttpModelProvider:
             if self.profile.reasoning_effort:
                 body["reasoning"] = {"effort": self.profile.reasoning_effort}
             if schema and native_structured:
-                body["text"] = {"format": {"type": "json_schema", "name": "fofamap_output", "strict": True, "schema": schema}}
+                body["text"] = {"format": {"type": "json_schema", "name": "cybermap_output", "strict": True, "schema": schema}}
             data = await self._json("POST", "/responses", json=body)
             text = data.get("output_text", "")
             if not text:
@@ -342,7 +342,7 @@ class HttpModelProvider:
             if schema and native_structured:
                 body["response_format"] = {
                     "type": "json_schema",
-                    "json_schema": {"name": "fofamap_output", "strict": True, "schema": schema},
+                    "json_schema": {"name": "cybermap_output", "strict": True, "schema": schema},
                 }
             data = await self._json("POST", "/chat/completions", json=body)
             text = assistant_message_text((data.get("choices") or [{}])[0].get("message") or {})
@@ -359,7 +359,7 @@ class HttpModelProvider:
                 f"模型 {self.name}/{selected_model} 未返回符合 Schema 的结构化 JSON。"
                 + (f" 首个校验错误：{schema_error}" if schema_error else ""),
                 code="model_structured_output_error",
-                hint="该模型可能不支持可靠的结构化输出；请在 `fofamap init` 中更换模型或接口协议。",
+                hint="该模型可能不支持可靠的结构化输出；请在 `cybermap init` 中更换模型或接口协议。",
             )
         return ModelResult(
             text=text,

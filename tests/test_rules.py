@@ -1,4 +1,5 @@
-from core.agent import AgentQuery, _deterministic_fallback_plan, _merge_library_queries
+from core.agent import AgentQuery, _merge_library_queries
+from core.agent_profiles import agent_profile, fofa_fallback_plan
 from core.rules import (
     LIBRARY_RULES,
     library_size,
@@ -53,10 +54,11 @@ def test_match_intent_expands_oa_category_without_a_specific_product():
 
 
 def test_fallback_and_merge_prefer_library_fingerprints():
-    plan = _deterministic_fallback_plan("找一下致远OA")
+    plan = fofa_fallback_plan("找一下致远OA")
     assert plan["queries"][0]["query"] == 'app="致远互联-OA"'
     assert plan["queries"][0]["strategy"] == "precision"
     merged = _merge_library_queries(
+        agent_profile(None),
         "找一下 Jenkins",
         [AgentQuery(query='title="Jenkins"', purpose="名称召回", strategy="recall", source="planner")],
         limit=5,

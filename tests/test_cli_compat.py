@@ -9,7 +9,7 @@ import pytest
 from click.testing import CliRunner
 from rich.console import Console
 
-import fofamap
+import cybermap
 from core.models import AssetRecord, SearchPage
 from core.scans import default_nuclei_template_ids
 from utils import cli_ui
@@ -47,8 +47,8 @@ def test_v2_readme_command_matrix_routes_without_semantic_loss(monkeypatch, argu
         captured.update(options)
         return 0
 
-    monkeypatch.setattr(fofamap, "_main_async", fake_main_async)
-    result = CliRunner().invoke(fofamap.main, [*arguments, "--no-save"])
+    monkeypatch.setattr(cybermap, "_main_async", fake_main_async)
+    result = CliRunner().invoke(cybermap.main, [*arguments, "--no-save"])
     assert result.exit_code == 0, result.output
     for name, value in expected.items():
         assert captured[name] == value
@@ -110,7 +110,7 @@ async def test_status_then_keyword_filter_uses_fofa_status_without_network_probe
     async def forbidden_probe(*_args, **_kwargs):
         raise AssertionError("FOFA status_code 可用时不应额外访问目标")
 
-    monkeypatch.setattr(fofamap.FastChecker, "check_alive", forbidden_probe)
+    monkeypatch.setattr(cybermap.FastChecker, "check_alive", forbidden_probe)
     counters = {"pages": 0, "records": 0, "targets": []}
     options = {
         "include": "200",
@@ -118,9 +118,13 @@ async def test_status_then_keyword_filter_uses_fofa_status_without_network_probe
         "check_alive": False,
         "output_format": "json",
     }
-    result = [item async for item in fofamap._decorate_pages(pages(), options=options, counters=counters)]
+    result = [item async for item in cybermap._decorate_pages(pages(), options=options, counters=counters)]
     assert [record.values["host"] for record in result[0].records] == ["https://travel.example.com"]
-    assert counters == {"pages": 1, "records": 1, "targets": ["https://travel.example.com"]}
+    assert {key: counters[key] for key in ("pages", "records", "targets")} == {
+        "pages": 1,
+        "records": 1,
+        "targets": ["https://travel.example.com"],
+    }
 
 
 @pytest.mark.asyncio
@@ -134,7 +138,7 @@ async def test_agent_results_honor_check_alive_and_include_filters(monkeypatch):
             "https://forbid.example.com": 403,
         }
 
-    monkeypatch.setattr(fofamap.FastChecker, "check_alive", fake_probe)
+    monkeypatch.setattr(cybermap.FastChecker, "check_alive", fake_probe)
     run = AgentRun(
         intent="收集示例资产并扫描",
         state=AgentState.COMPLETED,
@@ -156,7 +160,7 @@ async def test_agent_results_honor_check_alive_and_include_filters(monkeypatch):
         scan_recommended=True,
         scan_template_ids=["http-missing-security-headers"],
     )
-    await fofamap._apply_agent_result_filters(
+    await cybermap._apply_agent_result_filters(
         run,
         {"check_alive": True, "include": "200", "key_word": None},
         machine=True,
@@ -178,7 +182,7 @@ async def test_empty_alive_status_placeholder_is_probed_again(monkeypatch):
         assert targets == ["https://later.example.com"]
         return {"https://later.example.com": 200}
 
-    monkeypatch.setattr(fofamap.FastChecker, "check_alive", fake_probe)
+    monkeypatch.setattr(cybermap.FastChecker, "check_alive", fake_probe)
     run = AgentRun(
         intent="监测存活性",
         state=AgentState.COMPLETED,
@@ -190,7 +194,7 @@ async def test_empty_alive_status_placeholder_is_probed_again(monkeypatch):
         ],
         asset_confidence=["balanced", "recall"],
     )
-    await fofamap._apply_agent_result_filters(run, {"check_alive": True, "include": None, "key_word": None}, machine=True)
+    await cybermap._apply_agent_result_filters(run, {"check_alive": True, "include": None, "key_word": None}, machine=True)
     assert run.assets[0]["alive_status"] == 412
     assert run.assets[1]["alive_status"] == 200
     assert "存活检测与本地过滤完成" in run.steps[-1].detail
@@ -208,7 +212,7 @@ async def test_scan_prompt_uses_ask_async_inside_running_event_loop(monkeypatch)
             return "report"
 
     monkeypatch.setattr(questionary, "select", lambda *_args, **_kwargs: Answer())
-    assert await fofamap._maybe_await(fofamap._prompt_scan_action()) == "report"
+    assert await cybermap._maybe_await(cybermap._prompt_scan_action()) == "report"
 
 
 def test_alive_status_column_is_inserted_beside_protocol():
@@ -231,7 +235,7 @@ def test_v2_batch_lines_normalize_ip_domain_and_keep_fofa_syntax(tmp_path: Path)
         "# 2.0 README examples\n8.8.8.8\nbaidu.com\nicp=\"京ICP备00000000号\"\n",
         encoding="utf-8",
     )
-    assert fofamap._load_batch(str(source)) == [
+    assert cybermap._load_batch(str(source)) == [
         'ip="8.8.8.8"',
         'domain="baidu.com"',
         'icp="京ICP备00000000号"',
@@ -248,7 +252,7 @@ def test_batch_ip_and_domain_clues_are_combined_without_rewriting_custom_queries
         'ip="1.1.1.1"',
     ]
 
-    assert fofamap._combine_batch_queries(queries, group_size=100) == [
+    assert cybermap._combine_batch_queries(queries, group_size=100) == [
         '(ip="1.1.1.1" || ip="8.8.8.8")',
         '(domain="example.com" || domain="example.org")',
         'icp="京ICP备00000000号"',
@@ -258,14 +262,14 @@ def test_batch_ip_and_domain_clues_are_combined_without_rewriting_custom_queries
 def test_batch_query_combination_respects_group_and_query_length_limits():
     queries = [f'domain="asset-{index}.example.com"' for index in range(5)]
 
-    grouped = fofamap._combine_batch_queries(queries, group_size=2, max_query_length=80)
+    grouped = cybermap._combine_batch_queries(queries, group_size=2, max_query_length=80)
 
     assert len(grouped) == 3
     assert all(len(query) <= 80 for query in grouped)
 
 
 def test_explicit_export_path_infers_format_and_suffix():
-    path, format_name = fofamap._query_export_path(
+    path, format_name = cybermap._query_export_path(
         {"outfile": "reports/result.csv", "export_format": None},
         'app="nginx"',
         1,
@@ -286,29 +290,29 @@ def test_init_command_starts_safe_interactive_wizard_without_nested_event_loop(m
     def forbidden_asyncio_run(*_args, **_kwargs):
         raise AssertionError("interactive init must run before asyncio.run")
 
-    monkeypatch.setattr(fofamap, "_interactive_init", fake_init)
-    monkeypatch.setattr(fofamap.asyncio, "run", forbidden_asyncio_run)
-    result = CliRunner().invoke(fofamap.main, [argument])
+    monkeypatch.setattr(cybermap, "_interactive_init", fake_init)
+    monkeypatch.setattr(cybermap.asyncio, "run", forbidden_asyncio_run)
+    result = CliRunner().invoke(cybermap.main, [argument])
     assert result.exit_code == 0
     assert called["count"] == 1
 
 
 def test_public_version_is_2_0_1():
-    result = CliRunner().invoke(fofamap.main, ["--version"])
+    result = CliRunner().invoke(cybermap.main, ["--version"])
     assert result.exit_code == 0
-    assert result.output.strip() == "FofaMap, version 2.0.1"
+    assert result.output.strip() == "CyberMap, version 2.0.1"
     assert "3.0" not in result.output
 
 
 def test_setup_config_rejects_secret_values(tmp_path: Path):
     with pytest.raises(ValueError, match="不得包含密钥"):
-        fofamap._save_setup_config(tmp_path / "settings.yaml", {"fofa": {"api_key": "must-not-be-written"}})
+        cybermap._save_setup_config(tmp_path / "settings.yaml", {"fofa": {"api_key": "must-not-be-written"}})
     assert not (tmp_path / "settings.yaml").exists()
 
 
 def test_setup_config_allows_explicit_secret_opt_in_and_sets_private_permissions(tmp_path: Path):
     target = tmp_path / "settings.yaml"
-    fofamap._save_setup_config(
+    cybermap._save_setup_config(
         target,
         {
             "fofa": {"email": "user@example.test", "api_key": "fofa-test-key"},
@@ -347,19 +351,36 @@ def test_init_falls_back_to_confirmed_yaml_when_keyring_is_unavailable(tmp_path:
             "results",
         ]
     )
-    password_answers = iter(["fofa-test-key", "deepseek-test-key"])
+    password_answers = iter(
+        [
+            "fofa-test-key",
+            "shodan-test-key",
+            "hunter-test-key",
+            "censys-test-token",
+            "daydaymap-test-key",
+            "deepseek-test-key",
+        ]
+    )
     select_answers = iter(["deepseek", "xlsx"])
     monkeypatch.setattr(questionary, "text", lambda *_args, **_kwargs: Answer(next(text_answers)))
     monkeypatch.setattr(questionary, "password", lambda *_args, **_kwargs: Answer(next(password_answers)))
     monkeypatch.setattr(questionary, "select", lambda *_args, **_kwargs: Answer(next(select_answers)))
     monkeypatch.setattr(questionary, "confirm", lambda *_args, **_kwargs: Answer(True))
-    monkeypatch.setattr(fofamap, "_store_keyring", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(cybermap, "_store_keyring", lambda *_args, **_kwargs: False)
     target = tmp_path / "settings.yaml"
-    monkeypatch.setattr(fofamap, "config_write_path", lambda: target)
+    monkeypatch.setattr(cybermap, "config_write_path", lambda: target)
 
-    assert fofamap._interactive_init() == 0
+    assert cybermap._interactive_init() == 0
     data = yaml.safe_load(target.read_text(encoding="utf-8"))
     assert data["fofa"]["api_key"] == "fofa-test-key"
+    assert data["shodan"]["api_key"] == "shodan-test-key"
+    assert data["shodan"]["base_url"] == "https://api.shodan.io"
+    assert data["hunter"]["api_key"] == "hunter-test-key"
+    assert data["hunter"]["base_url"] == "https://hunter.qianxin.com"
+    assert data["censys"]["api_token"] == "censys-test-token"  # noqa: S105 - fixture value
+    assert data["censys"]["base_url"] == "https://api.platform.censys.io"
+    assert data["daydaymap"]["api_key"] == "daydaymap-test-key"  # noqa: S105 - fixture value
+    assert data["daydaymap"]["base_url"] == "https://www.daydaymap.com"
     assert data["providers"]["deepseek"]["api_key"] == "deepseek-test-key"
     assert data["providers"]["deepseek"]["structured_output_mode"] == "prompt"
     assert data["providers"]["deepseek"]["max_output_tokens"] == 32768
@@ -376,8 +397,8 @@ def test_init_falls_back_to_confirmed_yaml_when_keyring_is_unavailable(tmp_path:
 
 
 def test_windows_local_yaml_notice_does_not_claim_posix_permissions(monkeypatch):
-    monkeypatch.setattr(fofamap.os, "name", "nt")
-    notice = fofamap._local_yaml_security_notice()
+    monkeypatch.setattr(cybermap.os, "name", "nt")
+    notice = cybermap._local_yaml_security_notice()
     assert "Windows" in notice
     assert "无法用 POSIX 0600 表示" in notice
     assert "系统钥匙串或环境变量" in notice
@@ -394,15 +415,15 @@ def test_keyring_diagnostic_explains_missing_package(monkeypatch):
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
-    reason = fofamap._keyring_unavailable_reason()
+    reason = cybermap._keyring_unavailable_reason()
     assert "未安装 keyring" in reason
     assert sys.executable in reason
 
 
 @pytest.mark.asyncio
 async def test_scan_plan_is_never_executed_when_user_declines(monkeypatch):
-    monkeypatch.setattr(fofamap, "_prompt_scan_action", lambda: "cancel")
-    status, artifact, error = await fofamap._approve_and_execute_scan(
+    monkeypatch.setattr(cybermap, "_prompt_scan_action", lambda: "cancel")
+    status, artifact, error = await cybermap._approve_and_execute_scan(
         targets=["https://example.com"],
         template_ids=["http-missing-security-headers"],
         severities=["medium"],
@@ -441,14 +462,14 @@ async def test_explicit_all_reaches_typed_approval_and_scanner_without_filters(t
             captured["executed_request"] = request
             return type("Result", (), {"artifact": tmp_path / "nuclei.jsonl"})()
 
-    monkeypatch.setattr(fofamap, "_prompt_scan_action", lambda: "execute")
-    monkeypatch.setattr(fofamap, "render_scan_approval", lambda **kwargs: captured.update({"rendered": kwargs}))
-    monkeypatch.setattr(fofamap, "render_nuclei_results", lambda _result: None)
+    monkeypatch.setattr(cybermap, "_prompt_scan_action", lambda: "execute")
+    monkeypatch.setattr(cybermap, "render_scan_approval", lambda **kwargs: captured.update({"rendered": kwargs}))
+    monkeypatch.setattr(cybermap, "render_nuclei_results", lambda _result: None)
     monkeypatch.setattr("service.store.JobStore", FakeStore)
     monkeypatch.setattr("core.scans.ScanApproval", FakeApproval)
     monkeypatch.setattr("core.scanner.NucleiScanner", FakeScanner)
 
-    status, _artifact, error = await fofamap._approve_and_execute_scan(
+    status, _artifact, error = await cybermap._approve_and_execute_scan(
         targets=["https://example.com"],
         template_ids=["all"],
         severities=["all"],
@@ -503,11 +524,11 @@ async def test_classic_nuclei_flag_creates_approval_flow_after_search(monkeypatc
         captured.update(kwargs)
         return "declined", None, None
 
-    monkeypatch.setattr(fofamap, "_approve_and_execute_scan", fake_approval)
-    monkeypatch.setattr(fofamap, "render_search_page", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(fofamap, "render_search_summary", lambda **_kwargs: None)
-    monkeypatch.setattr(fofamap, "render_query_overview", lambda *_args, **_kwargs: None)
-    await fofamap._run_searches(
+    monkeypatch.setattr(cybermap, "_approve_and_execute_scan", fake_approval)
+    monkeypatch.setattr(cybermap, "render_search_page", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cybermap, "render_search_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(cybermap, "render_query_overview", lambda *_args, **_kwargs: None)
+    await cybermap._run_searches(
         FakeClient(),
         ['app="nginx"'],
         {
@@ -606,14 +627,15 @@ async def test_ai_cli_harvard_scan_intent_reaches_safe_scan_and_report_bridge(mo
         captured.update({"run": run, "options": options, "machine": machine})
         return "declined", None
 
-    monkeypatch.setattr(fofamap, "FofaClient", FakeClient)
-    monkeypatch.setattr(fofamap, "_account", fake_account)
-    monkeypatch.setattr(fofamap, "render_agent", lambda _run: None)
-    monkeypatch.setattr(fofamap, "_agent_scan_and_report", fake_scan_report)
+    monkeypatch.setattr(cybermap, "create_engine", lambda name=None: FakeClient())
+    monkeypatch.setattr(cybermap, "_account", fake_account)
+    monkeypatch.setattr(cybermap, "render_agent", lambda _run: None)
+    monkeypatch.setattr(cybermap, "_agent_scan_and_report", fake_scan_report)
     monkeypatch.setattr("providers.registry.ProviderRegistry", FakeRegistry)
     monkeypatch.setattr("providers.registry.ProviderRouter", FakeRouter)
-    code = await fofamap._main_async(
+    code = await cybermap._main_async(
         cmd=None,
+        engine="fofa",
         ai_query="我收集一下美国哈佛大学的子域名网站，并扫描一下",
         output_format="table",
         max_records=100,
@@ -668,7 +690,7 @@ async def test_failed_ai_provider_stops_before_scan_and_report(monkeypatch):
                 error={
                     "code": "model_auth_failed",
                     "message": "API Key 无效",
-                    "hint": "运行 `fofamap init` 重新配置。",
+                    "hint": "运行 `cybermap init` 重新配置。",
                 },
             )
 
@@ -682,15 +704,16 @@ async def test_failed_ai_provider_stops_before_scan_and_report(monkeypatch):
         called["scan_report"] = True
         raise AssertionError("failed provider must not enter scan/report flow")
 
-    monkeypatch.setattr(fofamap, "FofaClient", FakeClient)
-    monkeypatch.setattr(fofamap, "_account", fake_account)
-    monkeypatch.setattr(fofamap, "render_agent", fake_render)
-    monkeypatch.setattr(fofamap, "_agent_scan_and_report", forbidden_scan_report)
-    monkeypatch.setattr("core.agent.FofaAgent", FailedAgent)
+    monkeypatch.setattr(cybermap, "create_engine", lambda name=None: FakeClient())
+    monkeypatch.setattr(cybermap, "_account", fake_account)
+    monkeypatch.setattr(cybermap, "render_agent", fake_render)
+    monkeypatch.setattr(cybermap, "_agent_scan_and_report", forbidden_scan_report)
+    monkeypatch.setattr("core.agent.AssetAgent", FailedAgent)
     monkeypatch.setattr("providers.registry.ProviderRegistry", FakeRegistry)
     monkeypatch.setattr("providers.registry.ProviderRouter", FakeRouter)
-    code = await fofamap._main_async(
+    code = await cybermap._main_async(
         cmd=None,
+        engine="fofa",
         ai_query="查找资产",
         output_format="table",
         max_records=100,
@@ -714,19 +737,19 @@ def test_wizard_cancel_on_pages_returns_none(monkeypatch):
     texts = iter(['app="nginx"', None])
     monkeypatch.setattr(questionary, "select", lambda *_args, **_kwargs: Answer("search"))
     monkeypatch.setattr(questionary, "text", lambda *_args, **_kwargs: Answer(next(texts)))
-    assert fofamap._wizard({}) is None
+    assert cybermap._wizard({}) is None
 
 
 def test_search_window_honors_start_page_and_cli_page_count(monkeypatch):
-    monkeypatch.setattr(fofamap.settings.search, "start_page", 3)
-    monkeypatch.setattr(fofamap.settings.search, "end_page", 5)
-    assert fofamap._search_window({}) == (3, 3)
-    assert fofamap._search_window({"pages": 2}) == (3, 2)
+    monkeypatch.setattr(cybermap.settings.search, "start_page", 3)
+    monkeypatch.setattr(cybermap.settings.search, "end_page", 5)
+    assert cybermap._search_window({}) == (3, 3)
+    assert cybermap._search_window({"pages": 2}) == (3, 2)
 
 
 def test_default_export_path_uses_per_run_directory(tmp_path, monkeypatch):
-    monkeypatch.setattr(fofamap.settings.system, "output_dir", str(tmp_path))
-    path = fofamap._default_export_path('app="nginx"', "xlsx")
+    monkeypatch.setattr(cybermap.settings.system, "output_dir", str(tmp_path))
+    path = cybermap._default_export_path('app="nginx"', "xlsx")
     assert path.parent.parent == tmp_path
     assert path.suffix == ".xlsx"
     assert path.parent.is_dir()
@@ -734,13 +757,13 @@ def test_default_export_path_uses_per_run_directory(tmp_path, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_scan_report_only_does_not_execute(monkeypatch):
-    monkeypatch.setattr(fofamap, "_prompt_scan_action", lambda: "report")
+    monkeypatch.setattr(cybermap, "_prompt_scan_action", lambda: "report")
 
     async def forbidden(*_args, **_kwargs):
         raise AssertionError("report-only must not start Nuclei")
 
     monkeypatch.setattr("core.scanner.NucleiScanner.run_plan", forbidden)
-    status, artifact, error = await fofamap._approve_and_execute_scan(
+    status, artifact, error = await cybermap._approve_and_execute_scan(
         targets=["https://example.com"],
         template_ids=["http-missing-security-headers"],
         severities=["medium"],
@@ -762,11 +785,11 @@ async def test_batch_xlsx_merge_writes_one_workbook(tmp_path, monkeypatch):
                 records=[AssetRecord(values={"host": f"https://{request.query}.example"})],
             )
 
-    monkeypatch.setattr(fofamap.settings.system, "sheet_merge", True)
-    monkeypatch.setattr(fofamap.settings.system, "export_format", "xlsx")
-    monkeypatch.setattr(fofamap, "render_search_page", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(fofamap, "render_search_summary", lambda **_kwargs: None)
-    monkeypatch.setattr(fofamap, "render_query_overview", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cybermap.settings.system, "sheet_merge", True)
+    monkeypatch.setattr(cybermap.settings.system, "export_format", "xlsx")
+    monkeypatch.setattr(cybermap, "render_search_page", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(cybermap, "render_search_summary", lambda **_kwargs: None)
+    monkeypatch.setattr(cybermap, "render_query_overview", lambda *_args, **_kwargs: None)
     options = {
         "query_fields": "host",
         "pages": 1,
@@ -785,7 +808,7 @@ async def test_batch_xlsx_merge_writes_one_workbook(tmp_path, monkeypatch):
         "outfile": None,
         "nuclei": False,
     }
-    await fofamap._run_searches(FakeClient(), ['app="one"', 'app="two"'], options)
+    await cybermap._run_searches(FakeClient(), ['app="one"', 'app="two"'], options)
     merged = list(tmp_path.glob("**/batch_merge_*.xlsx"))
     assert len(merged) == 1
     assert merged[0].stat().st_size > 0
@@ -795,7 +818,7 @@ async def test_batch_xlsx_merge_writes_one_workbook(tmp_path, monkeypatch):
 async def test_agent_exports_assets_into_run_directory(tmp_path, monkeypatch):
     from core.agent import AgentRun, AgentState
 
-    monkeypatch.setattr(fofamap, "_prompt_scan_action", lambda: "report")
+    monkeypatch.setattr(cybermap, "_prompt_scan_action", lambda: "report")
     run = AgentRun(
         intent='domain="example.com"',
         state=AgentState.COMPLETED,
@@ -808,7 +831,7 @@ async def test_agent_exports_assets_into_run_directory(tmp_path, monkeypatch):
         scan_template_ids=["http-missing-security-headers"],
         scan_targets=["https://example.com"],
     )
-    status, error = await fofamap._agent_scan_and_report(
+    status, error = await cybermap._agent_scan_and_report(
         run,
         {
             "save": True,
@@ -831,3 +854,74 @@ async def test_agent_exports_assets_into_run_directory(tmp_path, monkeypatch):
     reports = list(tmp_path.glob("**/report_*.md"))
     assert csv_files and "example.com" in csv_files[0].read_text(encoding="utf-8")
     assert reports
+
+
+def test_age_filter_parses_every_engine_time_format_and_keeps_untimed_rows():
+    import datetime as dt
+
+    import cybermap
+
+    now = dt.datetime.now()
+    fresh = (now - dt.timedelta(days=2)).strftime("%Y-%m-%d %H:%M:%S")
+    stale = (now - dt.timedelta(days=40)).strftime("%Y-%m-%d")
+    rows = [
+        {"host": "a", "lastupdatetime": fresh},                 # FOFA's own last-seen column
+        {"host": "a2", "timestamp": fresh},                     # unified name after a merge
+        {"host": "b", "timestamp": f"{stale}T00:00:00.123456"},  # Shodan banner time
+        {"host": "c", "timestamp": stale},                      # Hunter date only
+        {"host": "d"},                                          # no timestamp at all
+        {"host": "e", "timestamp": "not-a-date"},
+    ]
+
+    kept, stats = cybermap._apply_age_filter(rows, max_age_days=7)
+    assert [row["host"] for row in kept] == ["a", "a2", "d", "e"]
+    # Missing/garbled times are kept but counted: they must not silently read as fresh.
+    assert stats == {"dropped": 2, "unknown": 2}
+    assert cybermap._apply_age_filter(rows, max_age_days=None) == (rows, {})
+
+
+def test_freshness_filter_requests_each_engines_last_seen_column():
+    import cybermap
+    from core.engines import timestamp_field
+
+    assert timestamp_field("fofa") == "lastupdatetime"
+    assert timestamp_field("shodan") == "timestamp"
+    assert timestamp_field("hunter") == "timestamp"
+    for engine in ("shodan", "hunter"):
+        fields = cybermap._engine_fields(engine, {"max_age_days": 7}, None)
+        assert "timestamp" in fields
+    # FOFA gates the column behind a tier, so a low tier simply does not request it.
+    class LowTier:
+        user_info = {"vip_level": 0}
+    assert "lastupdatetime" not in cybermap._engine_fields("fofa", {"max_age_days": 7}, LowTier())
+
+
+@pytest.mark.asyncio
+async def test_a_failure_on_a_later_page_keeps_the_pages_already_collected():
+    """An aborted continuation must not discard (or half-write) the rows already displayed."""
+    from core.models import AssetRecord, FofaError, FofaErrorCode, SearchPage
+
+    async def pages():
+        yield SearchPage(query="q", fields=["host"], records=[AssetRecord(values={"host": "https://a.example"})])
+        raise FofaError(FofaErrorCode.INVALID_RESPONSE, "[40070] 游标无效或过期")
+
+    counters = {"pages": 0, "records": 0, "targets": []}
+    options = {"output_format": "json", "max_age_days": None}
+    collected = [page async for page in cybermap._decorate_pages(pages(), options=options, counters=counters)]
+
+    assert [record.values["host"] for page in collected for record in page.records] == ["https://a.example"]
+    assert counters["partial_error"] == "[40070] 游标无效或过期"
+
+
+@pytest.mark.asyncio
+async def test_a_first_page_failure_stays_fatal():
+    from core.models import FofaError, FofaErrorCode, SearchPage
+
+    async def pages():
+        if False:
+            yield SearchPage(query="q", fields=["host"], records=[])
+        raise FofaError(FofaErrorCode.AUTH_FAILED, "bad key")
+
+    counters = {"pages": 0, "records": 0, "targets": []}
+    with pytest.raises(FofaError):
+        [page async for page in cybermap._decorate_pages(pages(), options={"output_format": "json"}, counters=counters)]

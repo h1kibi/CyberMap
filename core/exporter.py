@@ -53,7 +53,7 @@ class XlsxTheme:
 
     @classmethod
     def create(cls, workbook: xlsxwriter.Workbook) -> XlsxTheme:
-        # Match FofaMap 2.0 core/excel.py: teal header, bordered cells, ID column.
+        # Match CyberMap 2.0 core/excel.py: teal header, bordered cells, ID column.
         return cls(
             header=workbook.add_format(
                 {

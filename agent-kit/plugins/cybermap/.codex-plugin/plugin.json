@@ -1,0 +1,23 @@
+{
+  "name": "cybermap",
+  "version": "2.0.1",
+  "description": "Safe multi-engine asset research through the local CyberMap MCP server and Agent Skill.",
+  "author": {
+    "name": "CyberMap"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "CyberMap",
+    "shortDescription": "Search and analyze exposed assets safely.",
+    "longDescription": "Validate FOFA/Shodan/Hunter/DayDayMap/Censys syntax, search and profile assets, aggregate statistics, and export bounded results with explicit controls for active scanning.",
+    "developerName": "CyberMap",
+    "category": "Developer Tools",
+    "capabilities": ["Search", "Analyze", "Export"],
+    "defaultPrompt": [
+      "Validate and run a bounded asset search.",
+      "Profile this host with engine evidence.",
+      "Summarize exposure statistics."
+    ]
+  },
+  "mcpServers": "./.mcp.json"
+}

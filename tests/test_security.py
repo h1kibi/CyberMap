@@ -1,8 +1,12 @@
+import codecs
+import hashlib
 import socket
 
 import httpx
+import mmh3
 import pytest
 
+from core.engines import favicon_query
 from utils.helpers import IconHashCalculator, assert_public_http_url, is_blocked_ssrf_address
 
 
@@ -36,8 +40,16 @@ def test_local_icon_file_uses_the_same_hash_pipeline(tmp_path):
     icon = tmp_path / "favicon.ico"
     icon.write_bytes(b"not-a-real-icon-but-stable-test-content")
 
-    assert IconHashCalculator.from_file(str(icon)) == IconHashCalculator.from_bytes(icon.read_bytes())
-    assert IconHashCalculator.from_file(str(icon)).startswith('icon_hash="')
+    digest = IconHashCalculator.hash_file(str(icon))
+    assert digest == IconHashCalculator.hash_bytes(icon.read_bytes())
+    content = icon.read_bytes()
+    # One read of the bytes serves every engine: FOFA/Shodan filter on the MurmurHash3 of the
+    # base64 form, Hunter filters on the MD5 of the file itself (verified against the live API).
+    assert digest.murmur3 == mmh3.hash(codecs.lookup("base64").encode(content)[0])
+    assert digest.md5 == hashlib.md5(content, usedforsecurity=False).hexdigest()
+    assert favicon_query("fofa", digest) == f'icon_hash="{digest.murmur3}"'
+    assert favicon_query("shodan", digest) == f"http.favicon.hash:{digest.murmur3}"
+    assert favicon_query("hunter", digest) == f'web.icon="{digest.md5}"'
 
 
 def test_local_icon_file_is_bounded(tmp_path, monkeypatch):
@@ -46,7 +58,7 @@ def test_local_icon_file_is_bounded(tmp_path, monkeypatch):
     monkeypatch.setattr(IconHashCalculator, "MAX_ICON_BYTES", 4)
 
     with pytest.raises(ValueError, match="4 MiB"):
-        IconHashCalculator.from_file(str(icon))
+        IconHashCalculator.hash_file(str(icon))
 
 
 def _patch_async_client(monkeypatch, handler):
@@ -74,8 +86,8 @@ async def test_icon_hash_follows_cdn_redirect(monkeypatch):
         return httpx.Response(404)
 
     _patch_async_client(monkeypatch, handler)
-    result = await IconHashCalculator.get_hash("https://www.qq.com")
-    assert result == IconHashCalculator.from_bytes(b"not-a-real-icon-but-stable-test-content")
+    result = await IconHashCalculator.hash_url("https://www.qq.com")
+    assert result == IconHashCalculator.hash_bytes(b"not-a-real-icon-but-stable-test-content")
 
 
 @pytest.mark.asyncio
@@ -91,4 +103,20 @@ async def test_icon_hash_rejects_metadata_redirect(monkeypatch):
         return httpx.Response(301, headers={"Location": "http://169.254.169.254/latest/meta-data"})
 
     _patch_async_client(monkeypatch, handler)
-    assert await IconHashCalculator.get_hash("https://www.example.com") is None
+    assert await IconHashCalculator.hash_url("https://www.example.com") is None
+
+
+def test_transport_loggers_stay_quiet_when_the_host_enables_info_logging():
+    """Every engine passes its key in the query string and httpx logs full URLs at INFO."""
+    import logging
+
+    import utils.logger  # noqa: F401 - importing the logging module applies the transport pin
+
+    root = logging.getLogger()
+    original = root.level
+    root.setLevel(logging.INFO)  # a service host that turns on INFO logging must still not leak
+    try:
+        assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+        assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
+    finally:
+        root.setLevel(original)

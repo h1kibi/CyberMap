@@ -1,1 +1,1 @@
-"""FofaMap utility helpers."""
+"""CyberMap utility helpers."""

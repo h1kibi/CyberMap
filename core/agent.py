@@ -7,25 +7,26 @@ import json
 import re
 import uuid
 from collections import Counter
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from enum import Enum
 from typing import Any, Literal
 
 from opentelemetry import trace
 from pydantic import BaseModel, Field
 
-from core.client import FofaClient
-from core.fields import (
-    STATS_FIELDS,
-    account_tier,
-    available_fields,
-    decide_fields,
-    fofa_request_fields,
-    merge_return_fields,
+from core.agent_profiles import (
+    ORGANIZATION_INTENT_PATTERN,
+    AgentProfile,
+    agent_profile,
+    briefing_system,
+    intent_context,
+    user_authorized_scan,
 )
-from core.membership import host_fallback_query, membership_from_account, planner_capabilities_prompt
-from core.models import FofaError, SearchPage, SearchRequest
-from core.rules import match_intent_rules, rules_hint_for_prompt
+from core.engines import MULTI_ENGINE, AssetSearchEngine, create_engine, engine_label, merge_aliases
+from core.hosting import hosting_provider
+from core.models import FofaError, SearchPage, SearchRequest, validate_query
+from core.playbooks import collection_steps, derived_pivots
+from core.rules import match_intent_rules
 from core.scans import align_scan_severities, default_nuclei_template_ids, nuclei_id_allowlist
 from providers.base import ProviderError
 from providers.registry import ProviderRouter
@@ -46,9 +47,25 @@ class AgentState(str, Enum):
 
 class AgentAction(str, Enum):
     SEARCH = "fofa_search"
+    SHODAN_SEARCH = "shodan_search"
+    HUNTER_SEARCH = "hunter_search"
+    DAYDAYMAP_SEARCH = "daydaymap_search"
+    MULTI_SEARCH = "all_search"
     HOST = "host_query"
     STATS = "stat_query"
     ICON = "icon_query"
+
+
+# List-search actions are engine-specific; every other stage treats them identically.
+SEARCH_ACTIONS = frozenset(
+    {
+        AgentAction.SEARCH,
+        AgentAction.SHODAN_SEARCH,
+        AgentAction.HUNTER_SEARCH,
+        AgentAction.DAYDAYMAP_SEARCH,
+        AgentAction.MULTI_SEARCH,
+    }
+)
 
 
 class AgentStep(BaseModel):
@@ -69,7 +86,7 @@ class AgentQuery(BaseModel):
 
 
 class WebsiteCandidate(BaseModel):
-    """A website surfaced by FOFA, with explicit attribution confidence."""
+    """A website surfaced by the active search engine, with explicit attribution confidence."""
 
     domain: str
     url: str
@@ -82,6 +99,7 @@ class WebsiteCandidate(BaseModel):
 class AgentRun(BaseModel):
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     intent: str
+    engine: str = "fofa"
     action: AgentAction = AgentAction.SEARCH
     target: str | None = None
     stats_fields: list[str] = Field(default_factory=list)
@@ -101,6 +119,12 @@ class AgentRun(BaseModel):
     website_candidates: list[WebsiteCandidate] = Field(default_factory=list)
     reflection_rounds: int = 0
     reflection_notes: list[str] = Field(default_factory=list)
+    stop_reason: str = ""
+    engine_errors: dict[str, dict[str, Any]] = Field(default_factory=dict)
+    # Freshness filter outcome: rows dropped as stale and rows kept without a timestamp.
+    age_filter: dict[str, int] = Field(default_factory=dict)
+    # How many merged assets were seen by more than one engine (cross-engine corroboration).
+    corroboration: dict[str, int] = Field(default_factory=dict)
     summary: str | None = None
     scan_requested_by_user: bool = False
     scan_recommended: bool = False
@@ -130,7 +154,6 @@ INITIAL_QUERY_VARIANTS = 5
 MAX_REFLECTION_ROUNDS = 2
 MAX_REFLECTION_ADDITIONS = 2
 EVIDENCE_RANK = {"recall": 1, "hypothesis": 2, "balanced": 3, "precision": 4}
-STAT_FIELDS = STATS_FIELDS
 
 
 def _record_step(
@@ -145,7 +168,7 @@ def _record_step(
     step = AgentStep(state=state, detail=detail, data=data or {})
     run.steps.append(step)
     if on_progress:
-        # Presentation observers must never be able to abort a FOFA run.
+        # Presentation observers must never be able to abort an engine run.
         try:
             on_progress(run, step)
         except Exception as exc:
@@ -196,47 +219,6 @@ async def _notify_page(
     except Exception as exc:
         logger.warning(f"Agent page observer failed: {exc}")
 
-
-PLAN_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "action": {"type": "string", "enum": ["fofa_search", "host_query", "stat_query", "icon_query"]},
-        "target": {"type": "string"},
-        "queries": {
-            "type": "array",
-            "minItems": 0,
-            "maxItems": INITIAL_QUERY_VARIANTS,
-            "items": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string"},
-                    "purpose": {"type": "string"},
-                    "strategy": {"type": "string", "enum": ["precision", "balanced", "recall"]},
-                },
-                "required": ["query", "purpose", "strategy"],
-                "additionalProperties": False,
-            },
-        },
-        "stats_fields": {"type": "array", "items": {"type": "string"}},
-        "fields": {"type": "array", "items": {"type": "string"}},
-        "scan": {
-            "type": "object",
-            "properties": {
-                "recommended": {"type": "boolean"},
-                "reason": {"type": "string"},
-                "template_ids": {"type": "array", "items": {"type": "string"}},
-                "severities": {
-                    "type": "array",
-                    "items": {"type": "string", "enum": ["info", "low", "medium", "high", "critical"]},
-                },
-            },
-            "required": ["recommended", "reason", "template_ids", "severities"],
-            "additionalProperties": False,
-        },
-    },
-    "required": ["action", "target", "queries", "stats_fields", "fields", "scan"],
-    "additionalProperties": False,
-}
 
 ENTITY_RESOLUTION_SCHEMA = {
     "type": "object",
@@ -291,46 +273,11 @@ REFLECTION_SCHEMA = {
     "additionalProperties": False,
 }
 
-SCAN_AUTHORIZATION_PATTERN = re.compile(r"(?:扫描|漏洞检测|漏洞扫描|nuclei|scan(?:ning)?)", re.IGNORECASE)
-SCAN_DENIAL_PATTERN = re.compile(
-    r"(?:不要|不需要|无需|禁止|拒绝|不进行|请勿|勿).{0,8}(?:扫描|漏洞检测|漏洞扫描|nuclei)"
-    r"|(?:no|do\s+not|don't|without)\s+(?:nuclei\s+)?scan(?:ning)?",
-    re.IGNORECASE,
-)
 SAFE_TEMPLATE_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-ORGANIZATION_SUFFIX_PATTERN = (
-    "公司|集团|大学|学院|学校|研究院|研究所|实验室|工作室|医院|协会|政府|委员会|中心|银行"
-)
-EN_ORGANIZATION_SUFFIX_PATTERN = (
-    "university|college|company|corporation|institute|laboratory|studio|school|"
-    "hospital|association|government|bank"
-)
-ORGANIZATION_INTENT_PATTERN = re.compile(
-    rf"(?:{ORGANIZATION_SUFFIX_PATTERN})|(?:{EN_ORGANIZATION_SUFFIX_PATTERN})\b",
+WEBSITE_INTENT_PATTERN = re.compile(
+    r"(?:网站|官网|域名|站点|子域名|资产|暴露面|websites?|domains?|sites?|subdomains?|assets?|recon|attack surface)",
     re.IGNORECASE,
 )
-WEBSITE_INTENT_PATTERN = re.compile(r"(?:网站|官网|域名|站点|websites?|domains?|sites?)", re.IGNORECASE)
-CN_ORGANIZATION_NAME_PATTERN = re.compile(
-    rf"(?:[A-Za-z][A-Za-z0-9._&'-]*|[\u4e00-\u9fff]|\d+){{1,40}}(?:{ORGANIZATION_SUFFIX_PATTERN})"
-)
-EN_ORGANIZATION_NAME_PATTERN = re.compile(
-    rf"\b((?:[A-Za-z][A-Za-z0-9.&']+\s+)+(?:{EN_ORGANIZATION_SUFFIX_PATTERN}))\b",
-    re.IGNORECASE,
-)
-FALLBACK_NOISE_PATTERN = re.compile(
-    r"(?:请|麻烦|帮我|帮忙|我要|需要|尽可能|尽量|查询|查找|搜索|收集|发现|分析|看看|一下|"
-    r"的?子域名网站|的?子域名|子域名|的?官网(?:网站)?|官网|的?网站|网站|的?域名|域名|"
-    r"的?站点|站点|的?主机名?|主机|的?网页|网页|"
-    r"的?全网资产|的?公开资产|相关资产|资产清单|的?资产|相关|"
-    r"并且|并|然后|进行|执行|漏洞检测|漏洞扫描|扫描一下|扫描)"
-    r"|\b(?:please|help\s+me|find|search|collect|discover|"
-    r"subdomains?|websites?|website|domains?|hosts?|assets?|and|scan(?:ning)?|them)\b",
-    re.IGNORECASE,
-)
-
-
-def user_authorized_scan(intent: str) -> bool:
-    return not SCAN_DENIAL_PATTERN.search(intent) and bool(SCAN_AUTHORIZATION_PATTERN.search(intent))
 
 
 def _scan_template_ids_for_intent(intent: str, suggested: list[str]) -> list[str]:
@@ -346,97 +293,6 @@ def _scan_template_ids_for_intent(intent: str, suggested: list[str]) -> list[str
     return list(dict.fromkeys([*default_nuclei_template_ids(), *normalized]))[:100]
 
 
-def _fofa_literal(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', '\\"').replace("\r", " ").replace("\n", " ").strip()
-
-
-def _organization_core_name(text: str) -> str | None:
-    english = EN_ORGANIZATION_NAME_PATTERN.search(text)
-    if english:
-        return english.group(1).strip()
-    chinese = CN_ORGANIZATION_NAME_PATTERN.search(text)
-    if chinese:
-        return chinese.group(0).strip()
-    return None
-
-
-def _fallback_search_term(intent: str) -> str:
-    quoted = re.search(r"[“‘'\"]([^”’'\"]{2,100})[”’'\"]", intent)
-    if quoted:
-        return quoted.group(1).strip()
-    cleaned = FALLBACK_NOISE_PATTERN.sub(" ", intent)
-    cleaned = re.sub(r"[，。！？、,:：;；()（）\[\]{}]+", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    organization = _organization_core_name(cleaned) or _organization_core_name(intent)
-    if organization:
-        return organization[:100]
-    parts = [part.strip() for part in cleaned.split() if len(part.strip()) >= 2]
-    return max(parts, key=len)[:100] if parts else intent.strip()[:100]
-
-
-def _deterministic_fallback_plan(intent: str) -> dict[str, Any]:
-    """Produce a conservative executable search when planner JSON is unusable."""
-    domain_match = re.search(r"(?:https?://)?((?:[a-z0-9-]+\.)+[a-z]{2,63})(?:/|\b)", intent, re.IGNORECASE)
-    ip_match = re.search(r"(?<![\d.])(?:\d{1,3}\.){3}\d{1,3}(?![\d.])", intent)
-    if domain_match:
-        domain = _fofa_literal(domain_match.group(1).lower().removeprefix("www."))
-        query = f'(domain="{domain}" || host="{domain}")'
-        purpose = f"结构化规划降级：按用户提供的域名 {domain} 检索"
-        strategy = "precision"
-    elif ip_match:
-        ip = _fofa_literal(ip_match.group(0))
-        query = f'ip="{ip}"'
-        purpose = f"结构化规划降级：按用户提供的 IP {ip} 检索"
-        strategy = "precision"
-    else:
-        library = match_intent_rules(intent, limit=3)
-        if library:
-            return {
-                "action": AgentAction.SEARCH.value,
-                "target": "",
-                "queries": [
-                    {
-                        "query": rule.query,
-                        "purpose": f"规则库精确指纹：{rule.name}",
-                        "strategy": "precision",
-                    }
-                    for rule in library
-                ],
-                "stats_fields": [],
-                "fields": ["host", "ip", "port", "protocol", "title", "domain"],
-                "scan": {
-                    "recommended": user_authorized_scan(intent),
-                    "reason": "用户明确提出扫描需求；先完成只读资产发现，再展示边界并请求确认。"
-                    if user_authorized_scan(intent)
-                    else "未明确要求主动扫描。",
-                    "template_ids": default_nuclei_template_ids() if user_authorized_scan(intent) else [],
-                    "severities": ["medium", "high", "critical"],
-                },
-            }
-        term = _fofa_literal(_fallback_search_term(intent))
-        clauses = [f'title="{term}"', f'body="{term}"']
-        if ORGANIZATION_INTENT_PATTERN.search(term):
-            clauses.insert(0, f'org="{term}"')
-        query = "(" + " || ".join(clauses) + ")"
-        purpose = f"结构化规划降级：围绕用户核心名称“{term}”进行保守召回"
-        strategy = "recall"
-    return {
-        "action": AgentAction.SEARCH.value,
-        "target": "",
-        "queries": [{"query": query, "purpose": purpose, "strategy": strategy}],
-        "stats_fields": [],
-        "fields": ["host", "ip", "port", "protocol", "title", "domain"],
-        "scan": {
-            "recommended": user_authorized_scan(intent),
-            "reason": "用户明确提出扫描需求；先完成只读资产发现，再展示边界并请求确认。"
-            if user_authorized_scan(intent)
-            else "未明确要求主动扫描。",
-            "template_ids": default_nuclei_template_ids() if user_authorized_scan(intent) else [],
-            "severities": ["medium", "high", "critical"],
-        },
-    }
-
-
 def _scan_target(values: dict[str, Any]) -> str | None:
     host = str(values.get("host") or "").strip()
     if host.startswith(("http://", "https://")):
@@ -448,21 +304,15 @@ def _scan_target(values: dict[str, Any]) -> str | None:
         port = values.get("port")
         host = f"{ip}:{port}" if port else str(ip)
     protocol = str(values.get("protocol") or "http").lower()
-    scheme = "https" if "https" in protocol or str(values.get("port")) in {"443", "8443"} else "http"
+    family = _protocol_family(protocol)
+    if family == "other":
+        # SSH/RDP/database ports are not HTTP: asserting a scheme would feed Nuclei a URL it can
+        # never match, while a bare `host:port` lets it probe http(s) itself and lets network
+        # templates match. Verified against the local Nuclei build: bare `127.0.0.1:12345` is
+        # accepted and probed.
+        return host
+    scheme = "https" if family == "https" or str(values.get("port")) in {"443", "8443"} else "http"
     return f"{scheme}://{host}"
-
-
-def validate_query(query: str) -> list[str]:
-    errors: list[str] = []
-    if not query.strip():
-        errors.append("query is empty")
-    if any(char in query for char in ("\x00", "\r", "\n")):
-        errors.append("query contains control characters")
-    if query.count('"') % 2:
-        errors.append("unbalanced double quote")
-    if query.count("(") != query.count(")"):
-        errors.append("unbalanced parentheses")
-    return errors
 
 
 def _query_candidates(plan: dict[str, Any], *, source: str, limit: int) -> list[AgentQuery]:
@@ -491,21 +341,95 @@ def _query_candidates(plan: dict[str, Any], *, source: str, limit: int) -> list[
     return candidates
 
 
-def _merge_library_queries(intent: str, queries: list[AgentQuery], *, limit: int) -> list[AgentQuery]:
-    """Prepend bundled app= fingerprints when the user named a known product."""
-    matched = match_intent_rules(intent, limit=min(3, limit))
+def _inject_derived_pivots(
+    run: AgentRun,
+    profile: AgentProfile,
+    *,
+    on_progress: AgentProgressCallback | None = None,
+) -> list[AgentQuery]:
+    """Add pivots derived from what the first batch found (filing, certificate, netblock, domain).
+
+    The planner works from the user's wording only; a run's own results carry new seeds, and they
+    are the cheapest recall available. Everything stays bounded (`MAX_DERIVED_PIVOTS`) and labelled
+    `source="pivot"` with the tier the pivot deserves, and rows sitting on a hosting/CDN provider
+    are not used as seeds.
+    """
+    existing = [item.query for item in run.queries]
+    steps = derived_pivots(profile.engine, run.assets, existing=existing)
+    if not steps:
+        return []
+    added = [
+        AgentQuery(query=step.query, purpose=step.purpose, strategy=step.strategy, source="pivot")
+        for step in steps
+    ]
+    run.queries.extend(added)
+    _record_step(
+        run,
+        AgentState.INTENT,
+        f"已按首轮结果派生 {len(added)} 条补充枢轴（备案号 / 证书 / 网段 / 域名）",
+        data={"queries": [item.query for item in added], "pivots": [item.purpose for item in added]},
+        on_progress=on_progress,
+    )
+    return added
+
+
+def _inject_playbook_queries(
+    run: AgentRun,
+    profile: AgentProfile,
+    intent: str,
+    *,
+    on_progress: AgentProgressCallback | None = None,
+) -> None:
+    """Add the bounded, engine-native pivots the bundle knows for the user's own signals.
+
+    `min_evidence` and the query budget still apply, so an injected pivot competes for the same
+    record budget as the planner's own strategies, and every added query carries
+    `source="playbook"` with the evidence tier it deserves.
+    """
+    context = intent_context(intent)
+    matched = match_intent_rules(intent, limit=1)
+    steps = collection_steps(
+        profile.engine,
+        domain=context.domain,
+        product=matched[0].name if matched else None,
+        organization=context.organization,
+        existing=[item.query for item in run.queries],
+    )
+    if not steps:
+        return
+    run.queries.extend(
+        AgentQuery(query=step.query, purpose=step.purpose, strategy=step.strategy, source="playbook") for step in steps
+    )
+    _record_step(
+        run,
+        AgentState.INTENT,
+        f"已按内置信息收集剧本补充 {len(steps)} 条定向查询",
+        data={"queries": [step.query for step in steps], "pivots": [step.purpose for step in steps]},
+        on_progress=on_progress,
+    )
+
+
+def _merge_library_queries(
+    profile: AgentProfile,
+    intent: str,
+    queries: list[AgentQuery],
+    *,
+    limit: int,
+) -> list[AgentQuery]:
+    """Prepend bundled library fingerprints (FOFA app=) when the user named a known product."""
+    matched = profile.library_queries(intent, limit=min(3, limit))
     if not matched:
         return queries
     existing = " ".join(item.query for item in queries).lower()
     extras = [
         AgentQuery(
-            query=rule.query,
-            purpose=f"规则库精确指纹：{rule.name}",
-            strategy="precision",
-            source="library",
+            query=str(item["query"]),
+            purpose=str(item["purpose"]),
+            strategy=str(item["strategy"]),
+            source=str(item.get("source") or "library"),
         )
-        for rule in matched
-        if rule.query.lower() not in existing
+        for item in matched
+        if str(item["query"]).lower() not in existing
     ]
     if not extras:
         return queries
@@ -530,7 +454,12 @@ def _domain_hypothesis_insert_at(queries: list[AgentQuery]) -> int:
     return len(queries)
 
 
-def _domain_hypothesis_candidate(plan: dict[str, Any]) -> AgentQuery | None:
+def _is_list_action(action: AgentAction) -> bool:
+    """List search and stats actions both carry query strings; both engines behave identically here."""
+    return action in SEARCH_ACTIONS or action is AgentAction.STATS
+
+
+def _domain_hypothesis_candidate(plan: dict[str, Any], profile: AgentProfile) -> AgentQuery | None:
     raw_items = plan.get("domains") if isinstance(plan.get("domains"), list) else []
     domains: list[str] = []
     for item in raw_items:
@@ -543,9 +472,8 @@ def _domain_hypothesis_candidate(plan: dict[str, Any]) -> AgentQuery | None:
     domains = list(dict.fromkeys(domains))[:6]
     if not domains:
         return None
-    query = "(" + " || ".join(f'domain="{domain}" || host="{domain}"' for domain in domains) + ")"
     return AgentQuery(
-        query=query,
+        query=profile.hypothesis_query(domains),
         purpose="验证可能的官网域名：" + ", ".join(domains),
         strategy="hypothesis",
         source="entity_resolution",
@@ -582,7 +510,7 @@ def _website_identity_terms(run: AgentRun) -> list[str]:
     return list(dict.fromkeys(terms))[:12]
 
 
-def _derive_website_candidates(run: AgentRun) -> list[WebsiteCandidate]:
+def _derive_website_candidates(run: AgentRun, profile: AgentProfile) -> list[WebsiteCandidate]:
     """Turn noisy asset rows into a stable, evidence-labelled website inventory."""
     if not WEBSITE_INTENT_PATTERN.search(run.intent):
         return []
@@ -591,8 +519,9 @@ def _derive_website_candidates(run: AgentRun) -> list[WebsiteCandidate]:
     grouped: dict[str, dict[str, Any]] = {}
     for asset, strategy in zip(run.assets, run.asset_confidence, strict=False):
         host = str(asset.get("host") or "").strip()
+        signals = profile.attribution(asset)
         domain = _normalized_domain(asset.get("domain"))
-        cert_domain = _normalized_domain(asset.get("cert.subject.cn"))
+        cert_domain = _normalized_domain(signals.get("certificate_cn"))
         host_domain = _normalized_domain(host)
         domain = domain or cert_domain or host_domain
         if not domain:
@@ -620,7 +549,7 @@ def _derive_website_candidates(run: AgentRun) -> list[WebsiteCandidate]:
         entry["strategies"].add(strategy)
         title = str(asset.get("title") or "").lower()
         entry["title_match"] = entry["title_match"] or any(term in title for term in terms)
-        entry["icp"] = entry["icp"] or bool(str(asset.get("icp") or "").strip())
+        entry["icp"] = entry["icp"] or bool(str(signals.get("icp") or "").strip())
         entry["certificate"] = entry["certificate"] or cert_domain == domain
 
     candidates: list[WebsiteCandidate] = []
@@ -634,7 +563,9 @@ def _derive_website_candidates(run: AgentRun) -> list[WebsiteCandidate]:
             evidence.append("icp_observed")
         if entry["certificate"]:
             evidence.append("certificate_observed")
-        evidence.extend(f"fofa_{item}" for item in sorted(entry["strategies"], key=lambda item: -EVIDENCE_RANK.get(item, 1)))
+        evidence.extend(
+            profile.evidence_key(item) for item in sorted(entry["strategies"], key=lambda item: -EVIDENCE_RANK.get(item, 1))
+        )
         if entry["icp"] and (entry["brand_domain"] or entry["title_match"]):
             status, confidence = "corroborated", "high"
         elif domain in hypotheses and entry["title_match"] and entry["certificate"]:
@@ -680,23 +611,91 @@ def _derive_website_candidates(run: AgentRun) -> list[WebsiteCandidate]:
     return sorted(candidates, key=lambda item: (rank[item.status], item.domain))[:100]
 
 
+_SCHEME_PREFIX = re.compile(r"^[a-z][a-z0-9+.\-]*://", re.IGNORECASE)
+_PORT_SUFFIX = re.compile(r":\d+$")
+
+
+def _normalize_host(value: str) -> str:
+    """Strip scheme, userinfo, port, path and trailing dot so engines agree on one hostname.
+
+    Measured on one endpoint (45.33.32.156:80): FOFA returned `45.33.32.156`, Shodan
+    `http://scanme.nmap.org:80` and Hunter `http://scanme.nmap.org`. The raw string was part of
+    the asset identity, so the same service was counted once per engine.
+    """
+    host = _SCHEME_PREFIX.sub("", str(value or "").strip()).split("/", 1)[0]
+    host = host.split("@", 1)[-1].strip().lower()
+    if host.startswith("["):  # IPv6 literal: [2001:db8::1]:443
+        host = host.split("]", 1)[0].lstrip("[")
+    elif host.count(":") == 1:
+        # `host:port`. A bare IPv6 literal has more than one colon and no port to strip - without
+        # this guard `2001:db8::2` and `2001:db8::3` both collapsed to `2001:db8:` and one of the
+        # two assets was silently dropped as a duplicate.
+        host = _PORT_SUFFIX.sub("", host)
+    return host.rstrip(".")
+
+
+def _protocol_family(value: str) -> str:
+    """Fold the engines' protocol vocabularies into http / https / other.
+
+    Shodan reports `tcp` where FOFA and Hunter report `ssh` (measured on port 22) and
+    `https-simple-new` where they report `https`, so the raw value cannot key an identity.
+    """
+    text = str(value or "").strip().lower()
+    if "https" in text:
+        return "https"
+    if "http" in text:
+        return "http"
+    return "other"
+
+
 def _asset_identity(values: dict[str, Any]) -> tuple[str, ...]:
-    host = str(values.get("host") or "").strip().lower().rstrip("/")
-    if host:
-        scheme = "https" if host.startswith("https://") else "http" if host.startswith("http://") else ""
-        normalized_host = re.sub(r"^https?://", "", host)
-        protocol = str(values.get("protocol") or scheme).strip().lower()
-        port = str(values.get("port") or "").strip()
-        return ("host", normalized_host, port, protocol)
+    """Stable identity shared by every engine: one virtual host, or one socket.
+
+    Web rows are virtual hosts, so the hostname is what distinguishes sites sharing an IP:port.
+    Non-web rows are sockets (a hostname is only a DNS alias of the same service), and the engines
+    disagree on whether they name them by hostname or by address - measured: Shodan returned
+    `scanme.nmap.org:22` while FOFA and Hunter returned `45.33.32.156:22` - so the address wins
+    there. The protocol is folded to a family because Shodan says `tcp` where they say `ssh`.
+    """
+    host = _normalize_host(str(values.get("host") or ""))
     ip = str(values.get("ip") or "").strip().lower()
+    family = _protocol_family(str(values.get("protocol") or ""))
+    name = (ip or host) if family == "other" else (host or ip)
+    if not name:
+        return ("record", repr(sorted((str(key), str(value)) for key, value in values.items())))
+    return ("asset", name, str(values.get("port") or "").strip(), family)
+
+
+def _endpoint_key(values: dict[str, Any]) -> tuple[str, ...]:
+    """Rollup key for the endpoint behind a row: several virtual hosts share one IP:port."""
+    ip = str(values.get("ip") or "").strip().lower()
+    if not ip:
+        return _asset_identity(values)
+    return ("endpoint", ip, str(values.get("port") or "").strip(), _protocol_family(str(values.get("protocol") or "")))
+
+
+def asset_endpoint_count(assets: list[dict[str, Any]]) -> int:
+    """Distinct endpoints (ip:port:protocol family) behind a list of asset rows."""
+    return len({_endpoint_key(asset) for asset in assets})
+
+
+def _endpoint_label(values: dict[str, Any]) -> str:
+    ip = str(values.get("ip") or "").strip()
     port = str(values.get("port") or "").strip()
-    protocol = str(values.get("protocol") or "").strip().lower()
-    if ip:
-        return ("ip", ip, port, protocol)
-    return ("record", repr(sorted((str(key), str(value)) for key, value in values.items())))
+    return f"{ip}:{port}" if ip and port else ip or port
 
 
 def _compact_asset_sample(assets: list[dict[str, Any]], limit: int = 30) -> list[dict[str, str]]:
+    """Compact rows for prompts, spread across the ranked list instead of only its head.
+
+    Assets arrive ranked by evidence, so a large result set would otherwise reach the model as a
+    biased slice of its highest-confidence rows.
+    """
+    if len(assets) > limit:
+        step = len(assets) / limit
+        picked = [assets[min(int(index * step), len(assets) - 1)] for index in range(limit)]
+    else:
+        picked = list(assets)
     useful_fields = (
         "host",
         "domain",
@@ -714,7 +713,7 @@ def _compact_asset_sample(assets: list[dict[str, Any]], limit: int = 30) -> list
         "cert.issuer.org",
     )
     sample: list[dict[str, str]] = []
-    for asset in assets[:limit]:
+    for asset in picked:
         compact = {
             field: str(asset[field]).replace("\r", " ").replace("\n", " ")[:240]
             for field in useful_fields
@@ -730,8 +729,20 @@ def _top_counts(values: list[str], *, limit: int = 8) -> list[dict[str, Any]]:
     return [{"name": name, "count": count} for name, count in counter.most_common(limit)]
 
 
+def _briefing_country(values: dict[str, Any]) -> str:
+    """Canonical country for cross-engine aggregation: the ISO code when one is known.
+
+    FOFA answers `country` with a code, Shodan with an English name plus `country_code` and Hunter
+    with a Chinese name: reading the name column directly mixed 美国 / United States / US in one
+    ranking, so the aggregated view prefers the code.
+    """
+    code = str(values.get("country_code") or "").strip().upper()
+    return code or str(values.get("country") or "").strip()
+
+
 def _asset_briefing_stats(run: AgentRun) -> dict[str, Any]:
     assets = run.assets
+    hosting_providers = [hosting_provider(asset) for asset in assets]
     truncated = [
         {
             "purpose": item.purpose,
@@ -743,10 +754,12 @@ def _asset_briefing_stats(run: AgentRun) -> dict[str, Any]:
     ]
     return {
         "unique_assets": run.result_count,
+        "unique_endpoints": asset_endpoint_count(assets),
         "previewed": len(assets),
         "evidence": dict(run.evidence_counts),
         "unique_domains": len({str(asset.get("domain") or "").strip() for asset in assets if asset.get("domain")}),
         "unique_ips": len({str(asset.get("ip") or "").strip() for asset in assets if asset.get("ip")}),
+        "top_endpoints": _top_counts([_endpoint_label(asset) for asset in assets]),
         "top_domains": _top_counts([str(asset.get("domain") or "").strip() for asset in assets]),
         "top_titles": _top_counts(
             [re.sub(r"\s+", " ", str(asset.get("title") or "")).strip()[:80] for asset in assets]
@@ -754,12 +767,17 @@ def _asset_briefing_stats(run: AgentRun) -> dict[str, Any]:
         "top_orgs": _top_counts([str(asset.get("org") or "").strip() for asset in assets]),
         "top_products": _top_counts([str(asset.get("product") or "").strip()[:100] for asset in assets]),
         "top_servers": _top_counts([str(asset.get("server") or "").strip()[:100] for asset in assets]),
-        "top_countries": _top_counts([str(asset.get("country") or "").strip() for asset in assets]),
+        "top_countries": _top_counts([_briefing_country(asset) for asset in assets]),
         "top_ports": _top_counts([str(asset.get("port") or "").strip() for asset in assets]),
         "top_protocols": _top_counts([str(asset.get("protocol") or "").strip().lower() for asset in assets]),
         "alive": _top_counts(
             [str(asset.get("alive_status")) for asset in assets if asset.get("alive_status") not in (None, "")]
         ),
+        "age_filter": dict(run.age_filter),
+        "preview_limit": ASSET_PREVIEW_LIMIT,
+        "corroboration": dict(run.corroboration),
+        "hosting": _top_counts(hosting_providers),
+        "hosting_rows": sum(1 for provider in hosting_providers if provider),
         "truncated_queries": truncated,
     }
 
@@ -779,42 +797,15 @@ def _search_summary_prompt(run: AgentRun, intent: str) -> str:
         f"User intent: {intent}\n"
         f"Structured website candidates: {[item.model_dump() for item in run.website_candidates]}\n"
         f"Inventory stats: {json.dumps(_asset_briefing_stats(run), ensure_ascii=False)}\n"
+        f"Sample coverage: the two samples below are capped at 15 rows each out of {run.result_count} "
+        "deduplicated rows, while Inventory stats covers all of them; treat the samples as illustrative "
+        "and the stats as the distribution\n"
         f"Higher-confidence sample: {_assets_with_evidence(run, 'precision', 'balanced', 'hypothesis', limit=15)}\n"
         f"Recall/candidate sample: {_assets_with_evidence(run, 'recall', limit=15)}\n"
         f"Planned scan follow-up: requested={run.scan_requested_by_user}, recommended={run.scan_recommended}, "
         f"targets={len(run.scan_targets)}, template_ids={run.scan_template_ids}, severities={run.scan_severities}"
+        + (f"\nSearch stopped early: {run.stop_reason}" if run.stop_reason else "")
     )
-
-
-SEARCH_SUMMARY_SYSTEM = (
-    "You write a high-value defensive asset briefing in Simplified Chinese. The reader already saw the query-strategy table "
-    "and the asset list; do not recount how many FOFA queries ran, do not explain balanced/recall/precision as a method, "
-    "and do not narrate available_count, pagination, reflection rounds or intermediate totals. "
-    "Start immediately with ## 结论. Do not write chain-of-thought, hidden reasoning, or a preamble. "
-    "Synthesize concrete evidence, concentrations, anomalies, attribution limits, coverage gaps and prioritized actions; every claim "
-    "must be traceable to the supplied data. Avoid generic security advice and do not pad the answer. Keep the briefing between 350 "
-    "and 900 Chinese characters when data is non-empty. "
-    "Output GitHub-flavored Markdown in this exact skeleton, with a blank line between sections:\n"
-    "## 结论\n"
-    "2-3 sentences stating the asset picture, confidence split and most important exposure signal.\n\n"
-    "## 高置信资产\n"
-    "- **资产簇**：`host`（`ip`），说明归属证据和用途\n\n"
-    "## 风险与暴露面\n"
-    "- **端口/技术/可达性信号**：具体数据，以及为什么值得关注；不要把暴露直接写成漏洞\n\n"
-    "## 证据边界与噪声\n"
-    "- **候选簇**：具体误报或归属不确定性及依据\n\n"
-    "## 覆盖缺口\n"
-    "- **数据缺口**：分页截断、字段缺失、不可达或仍待交叉验证的范围\n\n"
-    "## 处置优先级\n"
-    "1. 基于具体资产和证据的验证动作、目的与预期结果\n"
-    "Rules: use `##` headings only, never numbered section titles; each bullet is one short line; "
-    "write 2-5 substantive bullets in each applicable evidence section and 3-5 ordered actions; "
-    "wrap hosts, IPs and domains in backticks; bold the cluster label; at most 5 bullets per section; "
-    "at most 3 hosts per bullet, then write 等 N 个; do not dump comma-separated subdomain lists. "
-    "Do not invent domains or products absent from the data. Treat Structured website candidates as the authoritative attribution "
-    "boundary: list every corroborated website in the high-confidence section, never promote observed/candidate entries to confirmed "
-    "or high-confidence, and do not omit a corroborated website merely because it appears late in the asset sample."
-)
 
 
 def _briefing_join(items: list[dict[str, Any]], *, limit: int = 5, wrap: bool = False) -> str:
@@ -841,7 +832,18 @@ def _local_search_summary(run: AgentRun) -> str:
     products = _briefing_join(stats["top_products"]) or "未识别"
     servers = _briefing_join(stats["top_servers"]) or "未识别"
     countries = _briefing_join(stats["top_countries"]) or "未返回"
+    endpoints = stats["unique_endpoints"]
+    top_endpoints = _briefing_join(stats["top_endpoints"], wrap=True) or "无"
+    fanout = (
+        f"；其中 {stats['unique_assets'] - endpoints} 条是同一 IP:端口 上的其它虚拟主机"
+        if endpoints and endpoints < stats["unique_assets"]
+        else ""
+    )
     alive = _briefing_join(stats["alive"]) or "未探测"
+    hosting_rows = int(stats.get("hosting_rows") or 0)
+    hosting = _briefing_join(stats.get("hosting") or []) or "无"
+    corroborated_rows = int((stats.get("corroboration") or {}).get("multi_engine") or 0)
+    corroboration = f"，其中 {corroborated_rows} 条被 ≥2 个引擎同时观测到（交叉印证）" if corroborated_rows else ""
     truncated = stats["truncated_queries"]
     corroborated = "、".join(
         f"`{item.domain}`" for item in run.website_candidates if item.status == "corroborated"
@@ -849,7 +851,9 @@ def _local_search_summary(run: AgentRun) -> str:
     candidates = "、".join(
         f"`{item.domain}`（{item.status}）" for item in run.website_candidates if item.status != "corroborated"
     ) or "无"
-    if truncated:
+    if run.stop_reason:
+        next_step = f"检索提前结束：{run.stop_reason}"
+    elif truncated:
         first = truncated[0]
         next_step = (
             f"部分查询仍有余量未拉全（例如 {first['purpose']} {first['pulled']}/{first['available']}），"
@@ -859,18 +863,29 @@ def _local_search_summary(run: AgentRun) -> str:
         next_step = "先复核高置信域名与证书/组织命中，再处理名称/正文候选。"
     return (
         "## 结论\n"
-        f"共识别去重资产 {stats['unique_assets']} 条，覆盖 {stats['unique_domains']} 个域名和 "
-        f"{stats['unique_ips']} 个 IP；高置信约 {high} 条，名称/正文召回候选 {recall} 条。"
+        f"共识别去重资产 {stats['unique_assets']} 条"
+        + (f"（受每引擎 {stats['preview_limit']} 条预览上限限制，实际命中更多）" if run.assets_truncated else "")
+        + f"，落在 {endpoints} 个独立端点（IP:端口）上{fanout}，"
+        f"覆盖 {stats['unique_domains']} 个域名和 {stats['unique_ips']} 个 IP{corroboration}；"
+        f"高置信约 {high} 条，名称/正文召回候选 {recall} 条。"
         "当前结果适合作为暴露面清单，但组织归属和漏洞结论仍需独立验证。\n\n"
         "## 高置信资产\n"
         f"- **交叉印证网站**：{corroborated}\n"
         f"- **主要域名**：{domains}\n\n"
         "## 风险与暴露面\n"
         f"- **端口与协议**：端口 {ports}；协议 {protocols}\n"
+        f"- **端点分布**：{top_endpoints}（记录 {stats['unique_assets']} 条 / 端点 {endpoints} 个）\n"
         f"- **产品与服务器**：产品 {products}；服务器 {servers}\n"
         f"- **可达性与地域**：存活状态 {alive}；地域 {countries}\n\n"
         "## 证据边界与噪声\n"
         f"- **待确认网站**：{candidates}\n"
+        + (
+            f"- **托管/CDN 归属**：{hosting_rows} 条落在托管或 CDN 网络（{hosting}），其证书、备案与组织字段属于服务商，"
+            "不能当作目标自身的归属证据，也不应作为派生枢轴的种子\n"
+            if hosting_rows
+            else ""
+        )
+        +
         f"- **高频标题**：{titles}；标题或正文命中不等同于组织归属\n"
         f"- **召回候选**：{recall} 条仍需官网内容、备案、证书或权威来源交叉验证\n\n"
         "## 覆盖缺口\n"
@@ -923,50 +938,45 @@ def _apply_generated_summary(
     run.summary = fallback
 
 
-def _align_action_to_membership(
+def _align_action_to_profile(
     run: AgentRun,
-    user_info: dict[str, Any],
+    profile: AgentProfile,
     *,
     on_progress: AgentProgressCallback | None = None,
 ) -> None:
-    membership = membership_from_account(user_info)
-    if membership is None:
+    """Apply engine capability downgrades before the selected action executes."""
+    fallback = profile.align_action(run.action.value, run.target, has_queries=bool(run.queries))
+    if fallback is None:
         return
-    if run.action is AgentAction.STATS and not membership.stats_api:
-        run.action = AgentAction.SEARCH
-        _record_step(
-            run,
-            AgentState.INTENT,
-            f"{membership.name} 无统计聚合 API，已改为普通检索",
-            data={"vip_level": membership.vip_level, "fallback": AgentAction.SEARCH.value},
-            on_progress=on_progress,
-        )
-        return
-    if run.action is AgentAction.HOST and not membership.host_api:
-        if run.target and not run.queries:
-            fallback = host_fallback_query(run.target)
-            run.queries = [
-                AgentQuery(
-                    query=fallback,
-                    purpose=f"{membership.name} 无主机聚合，改用检索",
-                    strategy="balanced",
-                    source="membership",
-                )
-            ]
-        run.action = AgentAction.SEARCH
-        _record_step(
-            run,
-            AgentState.INTENT,
-            f"{membership.name} 无主机聚合 API，已改为普通检索",
-            data={"vip_level": membership.vip_level, "target": run.target, "fallback": AgentAction.SEARCH.value},
-            on_progress=on_progress,
-        )
+    if fallback.queries and not run.queries:
+        run.queries = [
+            AgentQuery(
+                query=str(item["query"]),
+                purpose=str(item["purpose"]),
+                strategy=str(item["strategy"]),
+                source=str(item.get("source") or "capability"),
+            )
+            for item in fallback.queries
+        ]
+    run.action = AgentAction(fallback.action)
+    _record_step(run, AgentState.INTENT, fallback.note, data=fallback.data, on_progress=on_progress)
 
 
-class FofaAgent:
-    def __init__(self, client: FofaClient, router: ProviderRouter) -> None:
+class AssetAgent:
+    def __init__(self, client: AssetSearchEngine, router: ProviderRouter) -> None:
         self.client = client
         self.router = router
+        self.profile = agent_profile(client)
+
+    def _action_for(self, plan: dict[str, Any]) -> AgentAction:
+        """Map planner output onto this engine's verbs; unknown or foreign verbs fall back to list search."""
+        try:
+            action = AgentAction(str(plan.get("action") or "").strip())
+        except ValueError:
+            return AgentAction(self.profile.search_action)
+        if action in SEARCH_ACTIONS:
+            return AgentAction(self.profile.search_action)
+        return action
 
     async def _execute_routed_action(
         self,
@@ -982,9 +992,10 @@ class FofaAgent:
             from utils.helpers import IconHashCalculator
 
             _record_step(run, AgentState.EXECUTE, f"正在安全获取 {run.target} 的网站图标", on_progress=on_progress)
-            icon_query = await IconHashCalculator.get_hash(run.target)
-            if not icon_query:
+            icon_hash = await IconHashCalculator.hash_url(run.target)
+            if icon_hash is None:
                 raise ValueError("无法获取网站图标或计算哈希")
+            icon_query = self.profile.icon_query(icon_hash)
             run.queries = [
                 AgentQuery(query=icon_query, purpose="使用目标网站图标的 MurmurHash3 反查同类资产", strategy="balanced")
             ]
@@ -992,7 +1003,7 @@ class FofaAgent:
             _record_step(
                 run,
                 AgentState.INTENT,
-                "已将图标反查动作转换为可审计的 FOFA 查询策略",
+                f"已将图标反查动作转换为可审计的 {self.profile.label} 查询策略",
                 data={"target": run.target, "query": icon_query},
                 on_progress=on_progress,
             )
@@ -1015,13 +1026,10 @@ class FofaAgent:
             _record_step(run, AgentState.SUMMARIZE, "正在生成单体资产暴露面解读", on_progress=on_progress)
             summary = await self.router.generate(
                 "summarizer",
-                system=(
-                    "Summarize this FOFA Host profile as a defensive exposure overview. Distinguish observed ports/products from "
-                    "inference, do not claim a vulnerability without validation, and include data freshness limitations."
-                ),
+                system=self.profile.host_summary_system(),
                 prompt=(
                     f"User intent: {intent}\nTarget: {run.target}\n"
-                    f"FOFA Host data: {json.dumps(data, ensure_ascii=False, default=str)[:12000]}"
+                    f"{self.profile.label} Host data: {json.dumps(data, ensure_ascii=False, default=str)[:12000]}"
                 ),
             )
             _apply_generated_summary(run, summary.text, fallback=_local_generic_summary(run))
@@ -1030,15 +1038,14 @@ class FofaAgent:
 
         if run.action is AgentAction.STATS:
             if not run.queries:
-                raise ValueError("stat_query 需要一条 FOFA 查询语句")
+                raise ValueError(f"stat_query 需要一条 {self.profile.label} 查询语句")
             run.query = run.queries[0].query
-            errors = validate_query(run.query)
+            errors = validate_query(run.query) + self.profile.query_errors(run.query)
             if errors:
                 raise ValueError("统计查询语法无效：" + "; ".join(errors))
-            run.stats_fields = list(dict.fromkeys(field for field in run.stats_fields if field in STAT_FIELDS)) or [
-                "country",
-                "port",
-            ]
+            run.stats_fields = list(
+                dict.fromkeys(field for field in run.stats_fields if field in self.profile.stats_fields)
+            ) or list(self.profile.default_stats_fields)
             _record_step(
                 run,
                 AgentState.EXECUTE,
@@ -1052,20 +1059,17 @@ class FofaAgent:
             _record_step(
                 run,
                 AgentState.EVALUATE,
-                f"统计聚合完成，FOFA 总量 {run.result_count:,} 条",
+                f"统计聚合完成，{self.profile.label} 总量 {run.result_count:,} 条",
                 data={"query": run.query, "fields": run.stats_fields, "size": run.result_count},
                 on_progress=on_progress,
             )
             _record_step(run, AgentState.SUMMARIZE, "正在生成统计分布解读", on_progress=on_progress)
             summary = await self.router.generate(
                 "summarizer",
-                system=(
-                    "Summarize FOFA aggregate statistics. Separate observed counts from interpretation, mention the query and "
-                    "dimensions, identify concentration or anomalies, and do not infer vulnerabilities from aggregate data."
-                ),
+                system=self.profile.stats_summary_system(),
                 prompt=(
                     f"User intent: {intent}\nQuery: {run.query}\nDimensions: {run.stats_fields}\n"
-                    f"FOFA statistics: {json.dumps(data, ensure_ascii=False, default=str)[:12000]}"
+                    f"{self.profile.label} statistics: {json.dumps(data, ensure_ascii=False, default=str)[:12000]}"
                 ),
             )
             _apply_generated_summary(run, summary.text, fallback=_local_generic_summary(run))
@@ -1082,82 +1086,58 @@ class FofaAgent:
         max_pages: int = 10,
         fields: list[str] | None = None,
         smart_fields: bool = True,
+        min_evidence: str | None = None,
+        ensure_timestamp: bool = False,
         on_progress: AgentProgressCallback | None = None,
         on_page: AgentPageCallback | None = None,
     ) -> AgentRun:
-        run = AgentRun(intent=intent)
-        span = trace.get_tracer("fofamap.agent").start_span("fofamap.agent.run")
-        span.set_attribute("fofamap.agent.run_id", run.id)
+        run = AgentRun(intent=intent, engine=self.profile.engine)
+        # Rows whose strategy ranks below the caller's floor are dropped while collecting, so the
+        # asset list, the counts, the scan targets and the briefing all describe the same set.
+        min_rank = EVIDENCE_RANK.get(str(min_evidence or "").lower(), 0)
+        span = trace.get_tracer("cybermap.agent").start_span("cybermap.agent.run")
+        span.set_attribute("cybermap.agent.run_id", run.id)
+        span.set_attribute("cybermap.agent.engine", run.engine)
 
         def finish() -> AgentRun:
             run.route_events = [event.model_dump(mode="json") for event in self.router.events]
-            span.set_attribute("fofamap.agent.action", run.action.value)
-            span.set_attribute("fofamap.agent.state", run.state.value)
-            span.set_attribute("fofamap.agent.result_count", run.result_count)
+            span.set_attribute("cybermap.agent.action", run.action.value)
+            span.set_attribute("cybermap.agent.state", run.state.value)
+            span.set_attribute("cybermap.agent.result_count", run.result_count)
             if run.error:
                 span.set_attribute("error.type", str(run.error.get("code", "agent_error")))
             span.end()
             return run
 
         try:
-            _record_step(run, AgentState.INTENT, "正在识别任务类型并制定 FOFA 执行策略", on_progress=on_progress)
+            _record_step(
+                run,
+                AgentState.INTENT,
+                f"正在识别任务类型并制定 {self.profile.label} 执行策略",
+                on_progress=on_progress,
+            )
             run.scan_requested_by_user = user_authorized_scan(intent)
-            user_info = getattr(self.client, "user_info", None) or {}
-            vip_level = user_info.get("vip_level", user_info.get("level", "unknown"))
-            tier = account_tier(vip_level)
-            planner_system = (
-                    "You are a FOFA action router and query strategist. Select exactly one action: fofa_search for an asset list; "
-                    "host_query only for a single explicit IP/host profile; stat_query for counts, distributions, rankings or trends; "
-                    "or icon_query for reverse-searching an explicit website favicon. Put the explicit host/URL in target for host/icon "
-                    "actions, use an empty target for other actions, and select only supported aggregate dimensions for stat_query. "
-                    "For fofa_search, translate defensive asset-discovery intent into one to five high-quality, "
-                    "complementary read-only query strategies. A strategy may be a focused single clause or an advanced composite "
-                    "expression using parentheses, || and &&. Optimize the portfolio for coverage, precision and API efficiency: combine "
-                    "aliases or equivalent ownership signals in one query when that saves requests without adding noise; keep queries "
-                    "separate when they represent different precision/recall tradeoffs or need independent result evaluation. Include at "
-                    "least one balanced or recall-oriented strategy for organization discovery. Use domain, host, org, certificate "
-                    "subject, "
-                    "ICP, title, header or body only when semantically appropriate. Search syntax fields such as body= are independent of "
-                    "returned result fields. Do not invent a domain, ICP number, company alias or geography; organization-to-domain "
-                    "resolution is performed separately. Avoid an unbounded body/header organization-name query when it is likely to "
-                    "swamp the "
-                    "portfolio with third-party mentions; constrain it when a safe country, asset type or ownership signal is available. "
-                    "Keep every query "
-                    "within "
-                    "the exact organization, geography and authorization scope requested by the user. Avoid redundant queries whose result "
-                    "sets are predictably subsumed by another strategy. "
-                    "Also assess whether a bounded Nuclei follow-up would be useful. A scan recommendation is only a plan: "
-                    "never execute it. Use only template IDs made of letters, digits, dot, underscore or hyphen; "
-                    "For a general scan, the application will add its bounded multi-template web-baseline profile; "
-                    "use template_ids only for justified product-specific additions or exact IDs named by the user. "
-                    "Never emit shell arguments. Select returned fields from the allowed membership catalogue supplied in the user prompt; "
-                    "match the field count to the task and do not request body/header/banner unless the user asked for page content. "
-                    "When the user names a known product, OA, VPN, middleware, database, camera, CMS or ops panel, prefer the bundled "
-                    "FOFA library app= queries supplied in the user prompt. Use those query strings verbatim as precision strategies "
-                    "and do not invent app= names."
-                )
+            await self.profile.prepare()
             try:
-                library_hint = rules_hint_for_prompt(intent)
-                planner_prompt = f"User intent: {intent}\n{planner_capabilities_prompt(vip_level)}"
-                if smart_fields and not fields:
-                    planner_prompt += (
-                        f"\nFOFA membership tier: {tier or 'registered'}"
-                        f"\nAllowed return fields: {', '.join(sorted(available_fields(tier)))}"
-                        f"\nSuggested return fields: {', '.join(merge_return_fields([], account_tier_name=tier, intent=intent))}"
-                    )
+                library_hint = self.profile.library_hint(intent)
+                planner_prompt = self.profile.planner_context(
+                    intent,
+                    smart_fields=smart_fields,
+                    requested_fields=fields,
+                )
                 if library_hint:
                     planner_prompt = f"{planner_prompt}\n{library_hint}"
                 plan_result = await self.router.generate(
                     "planner",
-                    system=planner_system,
+                    system=self.profile.planner_system(),
                     prompt=planner_prompt,
-                    schema=PLAN_SCHEMA,
+                    schema=self.profile.plan_schema(),
                 )
                 plan = plan_result.structured if isinstance(plan_result.structured, dict) else {}
             except ProviderError as exc:
                 if exc.code != "model_structured_output_error":
                     raise
-                plan = _deterministic_fallback_plan(intent)
+                plan = self.profile.fallback_plan(intent)
                 _record_step(
                     run,
                     AgentState.INTENT,
@@ -1165,15 +1145,12 @@ class FofaAgent:
                     data={"error": exc.code, "query": plan["queries"][0]["query"]},
                     on_progress=on_progress,
                 )
-            try:
-                run.action = AgentAction(str(plan.get("action") or AgentAction.SEARCH.value))
-            except ValueError:
-                run.action = AgentAction.SEARCH
+            run.action = self._action_for(plan)
             run.target = str(plan.get("target") or "").strip() or None
             run.stats_fields = [str(item) for item in plan.get("stats_fields", [])]
             run.queries = _query_candidates(plan, source="planner", limit=INITIAL_QUERY_VARIANTS)
-            if run.action in {AgentAction.SEARCH, AgentAction.STATS}:
-                merged = _merge_library_queries(intent, run.queries, limit=INITIAL_QUERY_VARIANTS)
+            if _is_list_action(run.action):
+                merged = _merge_library_queries(self.profile, intent, run.queries, limit=INITIAL_QUERY_VARIANTS)
                 if [item.query for item in merged] != [item.query for item in run.queries]:
                     run.queries = merged
                     _record_step(
@@ -1183,6 +1160,7 @@ class FofaAgent:
                         data={"queries": [item.query for item in merged if item.source == "library"]},
                         on_progress=on_progress,
                     )
+                _inject_playbook_queries(run, self.profile, intent, on_progress=on_progress)
             explicit_domain = bool(
                 re.search(r"(?:https?://)?(?:[a-z0-9-]+\.)+[a-z]{2,63}(?:/|\b)", intent, re.IGNORECASE)
             )
@@ -1194,17 +1172,11 @@ class FofaAgent:
                 "net.cn",
                 "org.cn",
             }
-            planned_domains = {
-                value.lower().removeprefix("www.")
-                for item in run.queries
-                for value in re.findall(
-                    r'\b(?:domain|host)\s*=\s*"([^" ]+\.[a-z]{2,63})"', item.query, re.IGNORECASE
-                )
-            }
+            planned_domains = self.profile.planning_domains([item.query for item in run.queries])
             run.domain_hypotheses = sorted(planned_domains - generic_domain_scopes)
             planned_domain = bool(planned_domains - generic_domain_scopes)
             should_resolve_domain = (
-                run.action is AgentAction.SEARCH
+                run.action in SEARCH_ACTIONS
                 and not explicit_domain
                 and not planned_domain
                 and bool(ORGANIZATION_INTENT_PATTERN.search(intent))
@@ -1220,11 +1192,13 @@ class FofaAgent:
                     resolution_result = await self.router.generate(
                         "entity_resolver",
                         system=(
-                            "Resolve a named organization for defensive FOFA asset discovery. Return its common and official name "
+                            f"Resolve a named organization for defensive {self.profile.label} asset discovery. Return its common and "
+                            "official name "
                             "variants, plus three to six plausible website domains. Prefer a domain known from reliable general "
                             "knowledge when available. Otherwise derive strong acronym/name stems and test realistic suffixes such as "
                             ".cn, .edu.cn and .com.cn. A province or administrative prefix may be absent from the common name. Every "
-                            "domain is an untrusted hypothesis to be checked in FOFA, not proof of ownership. Do not fabricate ICP "
+                            f"domain is an untrusted hypothesis to be checked in {self.profile.label}, not proof of ownership. Do not "
+                            "fabricate ICP "
                             "numbers, IP addresses or ownership claims. Return structured data only."
                         ),
                         prompt=f"Organization request: {intent}",
@@ -1247,7 +1221,7 @@ class FofaAgent:
                             if domain
                         )
                     )[:6]
-                    hypothesis = _domain_hypothesis_candidate(resolution)
+                    hypothesis = _domain_hypothesis_candidate(resolution, self.profile)
                     if hypothesis:
                         insert_at = _domain_hypothesis_insert_at(run.queries)
                         run.queries.insert(insert_at, hypothesis)
@@ -1255,7 +1229,7 @@ class FofaAgent:
                         _record_step(
                             run,
                             AgentState.INTENT,
-                            "已生成官网域名候选，将先在 FOFA 中验证后再展示",
+                            f"已生成官网域名候选，将先在 {self.profile.label} 中验证后再展示",
                             data={
                                 "organization_names": resolution.get("organization_names", []),
                                 "query": hypothesis.query,
@@ -1264,17 +1238,17 @@ class FofaAgent:
                         )
                 except ProviderError as exc:
                     # Entity resolution improves recall but must never make an otherwise
-                    # valid FOFA workflow fail when a provider cannot satisfy its schema.
+                    # valid workflow fail when a provider cannot satisfy its schema.
                     logger.warning(f"Organization domain resolution skipped: {exc}")
                     _record_step(
                         run,
                         AgentState.INTENT,
-                        "官网域名线索解析暂不可用，继续执行名称与证书等 FOFA 查询",
+                        f"官网域名线索解析暂不可用，继续执行名称与证书等 {self.profile.label} 查询",
                         on_progress=on_progress,
                     )
-            if run.action in {AgentAction.SEARCH, AgentAction.STATS} and not run.queries:
-                raise ValueError("模型未生成任何 FOFA 查询候选")
-            _align_action_to_membership(run, user_info, on_progress=on_progress)
+            if _is_list_action(run.action) and not run.queries:
+                raise ValueError(f"模型未生成任何 {self.profile.label} 查询候选")
+            _align_action_to_profile(run, self.profile, on_progress=on_progress)
             run.query = run.queries[0].query if run.queries else None
             _record_step(
                 run,
@@ -1286,14 +1260,14 @@ class FofaAgent:
             if await self._execute_routed_action(run, intent, on_progress=on_progress):
                 return finish()
             if not run.queries:
-                raise ValueError("所选动作未生成 FOFA 查询语句")
+                raise ValueError(f"所选动作未生成 {self.profile.label} 查询语句")
             run.fields = [str(item) for item in plan.get("fields", [])]
             if fields:
                 run.fields = list(dict.fromkeys(str(item).strip() for item in fields if str(item).strip()))
             elif smart_fields:
-                run.fields = merge_return_fields(run.fields, account_tier_name=tier, intent=intent)
+                run.fields = self.profile.suggest_fields(run.fields, intent=intent)
             else:
-                run.fields = run.fields or ["host", "ip", "port", "protocol", "title"]
+                run.fields = run.fields or list(self.profile.default_fields)
             scan = plan.get("scan") if isinstance(plan.get("scan"), dict) else {}
             run.scan_recommended = bool(scan.get("recommended", False))
             run.scan_reason = str(scan.get("reason", ""))
@@ -1315,8 +1289,12 @@ class FofaAgent:
                 run.scan_severities = align_scan_severities(run.scan_template_ids, run.scan_severities)
             if run.scan_requested_by_user or run.scan_recommended:
                 run.fields = list(dict.fromkeys([*run.fields, "host", "protocol", "ip", "port", "title"]))
-            field_decision = decide_fields(run.fields, tier)
-            run.fields = field_decision.allowed or ["host", "ip", "port", "protocol", "title"]
+            if ensure_timestamp:
+                # The caller filters by age, so the engine's own last-seen column is required; it
+                # still passes the same deny check as any other requested field.
+                run.fields = list(dict.fromkeys([*run.fields, self.profile.timestamp_field]))
+            selection = self.profile.decide_fields(run.fields)
+            run.fields = selection.allowed or list(self.profile.default_fields)
 
             _record_step(
                 run,
@@ -1325,25 +1303,15 @@ class FofaAgent:
                 data={"queries": [item.model_dump() for item in run.queries], "fields": run.fields},
                 on_progress=on_progress,
             )
-            if field_decision.denied:
-                _record_step(
-                    run,
-                    AgentState.VALIDATE,
-                    "已按 FOFA 会员权限调整返回字段；查询语法中的高级检索字段不受影响",
-                    data={"denied": field_decision.denied, "fields": run.fields},
-                    on_progress=on_progress,
-                )
+            if selection.denied:
+                detail, data = self.profile.denied_fields_step(selection.denied, run.fields)
+                _record_step(run, AgentState.VALIDATE, detail, data=data, on_progress=on_progress)
             elif smart_fields and not fields:
-                _record_step(
-                    run,
-                    AgentState.INTENT,
-                    f"已按账号等级（{tier or '未知'}）和任务智能选择 {len(run.fields)} 个返回字段",
-                    data={"tier": tier, "fields": run.fields},
-                    on_progress=on_progress,
-                )
+                detail, data = self.profile.smart_fields_step(run.fields)
+                _record_step(run, AgentState.INTENT, detail, data=data, on_progress=on_progress)
 
             for index, candidate in enumerate(run.queries, start=1):
-                errors = validate_query(candidate.query)
+                errors = validate_query(candidate.query) + self.profile.query_errors(candidate.query)
                 if errors:
                     _record_step(
                         run,
@@ -1354,16 +1322,16 @@ class FofaAgent:
                     )
                     repair = await self.router.generate(
                         "query_repair",
-                        system="Repair only the syntax of a FOFA query. Preserve every organization and geography scope constraint.",
+                        system=self.profile.repair_system(),
                         prompt=f"Intent: {intent}\nQuery: {candidate.query}\nErrors: {errors}",
                         schema=QUERY_SCHEMA,
                     )
                     repaired = repair.structured if isinstance(repair.structured, dict) else {}
                     candidate.query = str(repaired.get("query", ""))
                     run.fields = [str(item) for item in repaired.get("fields", run.fields)]
-                    remaining = validate_query(candidate.query)
+                    remaining = validate_query(candidate.query) + self.profile.query_errors(candidate.query)
                     if remaining:
-                        raise ValueError("模型无法生成有效的 FOFA 查询：" + "; ".join(remaining))
+                        raise ValueError(f"模型无法生成有效的 {self.profile.label} 查询：" + "; ".join(remaining))
                 _record_step(
                     run,
                     AgentState.VALIDATE,
@@ -1376,6 +1344,8 @@ class FofaAgent:
             page_number = 0
             seen_assets: set[tuple[str, ...]] = set()
             evidence_by_asset: dict[tuple[str, ...], str] = {}
+            stopped: dict[str, str] = {}
+
             async def execute_queries(candidates: list[AgentQuery]) -> None:
                 nonlocal page_number
                 for batch_index, candidate in enumerate(candidates):
@@ -1399,54 +1369,69 @@ class FofaAgent:
                     )
                     request = SearchRequest(
                         query=candidate.query,
-                        fields=fofa_request_fields(run.fields) or run.fields,
+                        fields=self.profile.request_fields(run.fields),
                         max_records=query_budget,
                         max_pages=max_pages,
                     )
-                    async for page in self.client.iter_search(request):
-                        page_number += 1
-                        candidate.pages += 1
-                        raw_records = list(page.records)
-                        if page.total is not None:
-                            candidate.available_count = max(candidate.available_count or 0, page.total)
-                        candidate.result_count += len(raw_records)
-                        unique_records = []
-                        for record in raw_records:
-                            identity = _asset_identity(record.values)
-                            previous_evidence = evidence_by_asset.get(identity)
-                            if previous_evidence is None or EVIDENCE_RANK.get(candidate.strategy, 1) > EVIDENCE_RANK.get(
-                                previous_evidence, 1
-                            ):
-                                evidence_by_asset[identity] = candidate.strategy
-                            if identity in seen_assets:
-                                continue
-                            seen_assets.add(identity)
-                            unique_records.append(record)
-                        page.records = unique_records
-                        await _notify_page(on_page, run, page, page_number)
-                        candidate.new_assets += len(page.records)
-                        _record_page(run, page, page_number, strategy=candidate.strategy)
-                        _record_step(
-                            run,
-                            AgentState.EXECUTE,
-                            (
-                                f"策略 {query_number} 第 {candidate.pages} 页：返回 {len(raw_records)} 条，"
-                                f"新增 {len(page.records)} 条，累计去重资产 {run.result_count} 条"
-                            ),
-                            data={
-                                "query": candidate.query,
-                                "page": candidate.pages,
-                                "raw_records": len(raw_records),
-                                "new_assets": len(page.records),
-                                "records": run.result_count,
-                            },
-                            on_progress=on_progress,
-                        )
-                        if run.scan_requested_by_user or run.scan_recommended:
-                            for record in page.records:
-                                target = _scan_target(record.values)
-                                if target and target not in run.scan_targets and len(run.scan_targets) < 10_000:
-                                    run.scan_targets.append(target)
+                    try:
+                        async for page in self.client.iter_search(request):
+                            page_number += 1
+                            candidate.pages += 1
+                            raw_records = list(page.records)
+                            if page.total is not None:
+                                candidate.available_count = max(candidate.available_count or 0, page.total)
+                            candidate.result_count += len(raw_records)
+                            unique_records = []
+                            for record in raw_records:
+                                identity = _asset_identity(record.values)
+                                if min_rank and EVIDENCE_RANK.get(candidate.strategy, 1) < min_rank:
+                                    continue
+                                previous_evidence = evidence_by_asset.get(identity)
+                                if previous_evidence is None or EVIDENCE_RANK.get(candidate.strategy, 1) > EVIDENCE_RANK.get(
+                                    previous_evidence, 1
+                                ):
+                                    evidence_by_asset[identity] = candidate.strategy
+                                if identity in seen_assets:
+                                    continue
+                                seen_assets.add(identity)
+                                unique_records.append(record)
+                            page.records = unique_records
+                            await _notify_page(on_page, run, page, page_number)
+                            candidate.new_assets += len(page.records)
+                            _record_page(run, page, page_number, strategy=candidate.strategy)
+                            _record_step(
+                                run,
+                                AgentState.EXECUTE,
+                                (
+                                    f"策略 {query_number} 第 {candidate.pages} 页：返回 {len(raw_records)} 条，"
+                                    f"新增 {len(page.records)} 条，累计去重资产 {run.result_count} 条"
+                                ),
+                                data={
+                                    "query": candidate.query,
+                                    "page": candidate.pages,
+                                    "raw_records": len(raw_records),
+                                    "new_assets": len(page.records),
+                                    "records": run.result_count,
+                                },
+                                on_progress=on_progress,
+                            )
+                            if run.scan_requested_by_user or run.scan_recommended:
+                                for record in page.records:
+                                    target = _scan_target(record.values)
+                                    if target and target not in run.scan_targets and len(run.scan_targets) < 10_000:
+                                        run.scan_targets.append(target)
+                    except FofaError as exc:
+                        # Engine-declared soft stops keep the assets already collected and
+                        # continue to the summary instead of discarding the whole run. With
+                        # nothing collected the stop stays fatal, otherwise an exhausted
+                        # balance would be reported as "no assets found".
+                        note = self.profile.soft_stop(exc)
+                        if note is None or run.result_count == 0:
+                            raise
+                        stopped["note"] = note
+                        run.stop_reason = note
+                        _record_step(run, AgentState.EVALUATE, note, data=exc.as_dict(), on_progress=on_progress)
+                        return
 
             initial_queries = list(run.queries)
             await execute_queries(initial_queries)
@@ -1457,9 +1442,24 @@ class FofaAgent:
                 data={"records": run.result_count, "queries": [item.model_dump() for item in initial_queries]},
                 on_progress=on_progress,
             )
+            count_before_pivots = run.result_count
+            derived_queries = _inject_derived_pivots(run, self.profile, on_progress=on_progress)
+            if derived_queries:
+                await execute_queries(derived_queries)
+                _record_step(
+                    run,
+                    AgentState.EVALUATE,
+                    f"派生枢轴补充 {run.result_count - count_before_pivots} 条去重资产",
+                    data={
+                        "new_assets": run.result_count - count_before_pivots,
+                        "records": run.result_count,
+                        "queries": [item.query for item in derived_queries],
+                    },
+                    on_progress=on_progress,
+                )
 
             for reflection_round in range(1, MAX_REFLECTION_ROUNDS + 1):
-                if len(run.queries) >= MAX_QUERY_VARIANTS or run.result_count >= max_records:
+                if stopped or len(run.queries) >= MAX_QUERY_VARIANTS or run.result_count >= max_records:
                     break
                 _record_step(
                     run,
@@ -1471,24 +1471,7 @@ class FofaAgent:
                 try:
                     reflection = await self.router.generate(
                         "reflector",
-                        system=(
-                            "You are the result-reflection stage of a FOFA asset-discovery agent. Evaluate each executed strategy using "
-                            "its raw hit count and deduplicated additions, then propose zero to two efficient complementary strategies. "
-                            "A strategy may be a single clause or an advanced composite expression with parentheses, || and &&. Never "
-                            "mechanically split every field into a separate query. Combine equivalent aliases/signals when that improves "
-                            "API efficiency; separate precision and recall strategies when their noise profiles differ. When all results "
-                            "are zero, use a correction ladder: first remove only unsupported or overly strict conditions, then try a "
-                            "balanced composite across semantically valid ownership/content fields, and finally a bounded recall query "
-                            "using the strongest user-provided identifier. Do not invent domains, ICP numbers, aliases, parent companies "
-                            "or geographies without evidence. When results exist, derive follow-ups only from concrete sample signals "
-                            "such as domains returned by FOFA, certificate subjects, organization names, ICP values, products or titles. "
-                            "A strategy labeled hypothesis proves only that a candidate domain is indexed by FOFA; it does not confirm "
-                            "ownership. You may pivot from its observed IP/certificate to find related candidates, but must not call the "
-                            "domain confirmed or official without independent ownership evidence. Do not "
-                            "repeat or submit a query predictably subsumed by one already executed. Never expand the user's organization, "
-                            "geography or authorization scope. Mark coverage sufficient only when the user's goal has meaningful nonzero "
-                            "coverage or no safe evidence-based strategy remains."
-                        ),
+                        system=self.profile.reflector_system(),
                         prompt=(
                             f"User intent: {intent}\n"
                             f"Reflection round: {reflection_round}/{MAX_REFLECTION_ROUNDS}\n"
@@ -1527,20 +1510,19 @@ class FofaAgent:
                 ]
                 valid_additions: list[AgentQuery] = []
                 for item in additions:
-                    errors = validate_query(item.query)
+                    errors = validate_query(item.query) + self.profile.query_errors(item.query)
                     if errors:
                         repair = await self.router.generate(
                             "query_repair",
-                            system=(
-                                "Repair only the syntax of this reflected FOFA query. Preserve every organization and geography "
-                                "scope constraint and do not broaden the query."
-                            ),
+                            system=self.profile.repair_system(reflection=True),
                             prompt=f"Intent: {intent}\nQuery: {item.query}\nErrors: {errors}",
                             schema=QUERY_SCHEMA,
                         )
                         repaired = repair.structured if isinstance(repair.structured, dict) else {}
                         item.query = str(repaired.get("query") or "")
-                    if item.query not in existing_queries and not validate_query(item.query):
+                    if item.query not in existing_queries and not (
+                        validate_query(item.query) + self.profile.query_errors(item.query)
+                    ):
                         existing_queries.add(item.query)
                         valid_additions.append(item)
                 additions = valid_additions
@@ -1568,7 +1550,11 @@ class FofaAgent:
                     data={"new_assets": round_new_assets, "records": run.result_count},
                     on_progress=on_progress,
                 )
-                if coverage_sufficient or count_before > 0 or round_new_assets > 0:
+                # Stop when a round learned nothing and the run already had results. A round that
+                # added assets keeps the loop alive (that is what reflection is for), and an empty
+                # run gets its correction round - measured before this change: any run that had
+                # found an asset already stopped after round 1, so the second round never applied.
+                if coverage_sufficient or (round_new_assets == 0 and count_before > 0):
                     break
 
             run.asset_confidence = [evidence_by_asset.get(_asset_identity(asset), "recall") for asset in run.assets]
@@ -1584,7 +1570,7 @@ class FofaAgent:
                 for strategy in ("precision", "balanced", "hypothesis", "recall")
                 if any(value == strategy for value in evidence_by_asset.values())
             }
-            run.website_candidates = _derive_website_candidates(run)
+            run.website_candidates = _derive_website_candidates(run, self.profile)
             if run.website_candidates:
                 _record_step(
                     run,
@@ -1597,7 +1583,9 @@ class FofaAgent:
             _record_step(
                 run,
                 AgentState.EVALUATE,
-                f"全部 {len(run.queries)} 个查询策略执行完成，共发现 {run.result_count} 条去重资产",
+                f"全部 {len(run.queries)} 个查询策略执行完成，共发现 {run.result_count} 条去重资产"
+                if not stopped
+                else f"检索提前结束（{stopped['note']}）——已发现 {run.result_count} 条去重资产",
                 data={"records": run.result_count, "queries": [item.model_dump() for item in run.queries]},
                 on_progress=on_progress,
             )
@@ -1610,7 +1598,7 @@ class FofaAgent:
             _record_step(run, AgentState.SUMMARIZE, "正在基于资产样本生成总结", on_progress=on_progress)
             summary = await self.router.generate(
                 "summarizer",
-                system=SEARCH_SUMMARY_SYSTEM,
+                system=self.profile.summarizer_system(),
                 prompt=_search_summary_prompt(run, intent),
             )
             _apply_generated_summary(
@@ -1621,9 +1609,9 @@ class FofaAgent:
             )
             _record_step(run, AgentState.COMPLETED, "侦察任务已完成", on_progress=on_progress)
         except FofaError as exc:
-            # Exact FOFA errors stop the workflow and never trigger query reflection.
+            # Exact engine errors stop the workflow and never trigger query reflection.
             run.error = exc.as_dict()
-            _record_step(run, AgentState.FAILED, "FOFA 查询失败", data=run.error, on_progress=on_progress)
+            _record_step(run, AgentState.FAILED, f"{self.profile.label} 查询失败", data=run.error, on_progress=on_progress)
         except ProviderError as exc:
             run.error = {
                 "code": exc.code,
@@ -1637,3 +1625,320 @@ class FofaAgent:
             run.error = {"code": "agent_error", "message": str(exc), "retryable": False}
             _record_step(run, AgentState.FAILED, "智能体执行失败", data=run.error, on_progress=on_progress)
         return finish()
+
+
+_CANDIDATE_RANK = {"corroborated": 3, "observed": 2, "candidate": 1}
+
+
+def _mirror_steps(engine: str, merged: AgentRun, on_progress: AgentProgressCallback | None) -> AgentProgressCallback:
+    """Show each engine's steps inside the merged run so the live view keeps progressing."""
+    label = engine_label(engine)
+
+    def mirror(_run: AgentRun, step: AgentStep) -> None:
+        _record_step(merged, step.state, f"[{label}] {step.detail}", data=dict(step.data), on_progress=on_progress)
+
+    return mirror
+
+
+def _adopt_engine_run(merged: AgentRun, engine: str, engine_run: AgentRun) -> AgentRun:
+    """Carry one engine's non-list payload (host profile, statistics, favicon) through unchanged.
+
+    The merged run keeps the mirrored steps and any engine failures as the audit trail, while the
+    payload, action and state come from the engine that actually produced them.
+    """
+    for field in (
+        "action",
+        "target",
+        "stats_fields",
+        "result_data",
+        "state",
+        "query",
+        "queries",
+        "fields",
+        "assets",
+        "asset_confidence",
+        "website_candidates",
+        "evidence_counts",
+        "result_count",
+        "assets_truncated",
+        "scan_requested_by_user",
+        "scan_recommended",
+        "scan_reason",
+        "scan_template_ids",
+        "scan_severities",
+        "scan_targets",
+        "stop_reason",
+        "organization_names",
+        "domain_hypotheses",
+        "summary",
+    ):
+        setattr(merged, field, getattr(engine_run, field))
+    merged.engine = engine
+    return merged
+
+
+def _merge_runs(merged: AgentRun, per_engine: list[tuple[str, AgentRun]]) -> None:
+    """Merge per-engine runs on the shared asset identity, keeping the strongest evidence."""
+    fields: list[str] = []
+    assets: list[dict[str, Any]] = []
+    confidences: list[str] = []
+    positions: dict[tuple[str, ...], int] = {}
+    candidates: dict[str, WebsiteCandidate] = {}
+    templates: list[str] = []
+    severities: list[str] = []
+    targets: list[str] = []
+    reasons: list[str] = []
+    stops: list[str] = []
+    organizations: list[str] = []
+    hypotheses: list[str] = []
+    seen_by_engine: dict[tuple[str, ...], set[str]] = {}
+    for engine, run in per_engine:
+        label = engine_label(engine)
+        # Rename the few engine-native columns that already have a unified name, so one concept
+        # keeps one column when records from different engines describe the same asset.
+        aliases = merge_aliases(engine)
+        for field in run.fields:
+            name = aliases.get(field, field)
+            if name not in fields:
+                fields.append(name)
+        for asset, confidence in zip(run.assets, run.asset_confidence, strict=False):
+            incoming = {aliases.get(key, key): value for key, value in asset.items()}
+            identity = _asset_identity(incoming)
+            seen_by_engine.setdefault(identity, set()).add(engine)
+            position = positions.get(identity)
+            if position is None:
+                positions[identity] = len(assets)
+                assets.append(incoming)
+                confidences.append(confidence or "recall")
+                continue
+            kept = assets[position]
+            if EVIDENCE_RANK.get(confidence, 1) > EVIDENCE_RANK.get(confidences[position], 1):
+                # Stronger evidence wins, but columns it lacks are still filled in from the
+                # weaker row: a merge must never drop what an engine actually observed.
+                assets[position] = {**kept, **{key: value for key, value in incoming.items() if value not in (None, "")}}
+                confidences[position] = confidence
+            else:
+                # The stored row keeps its columns, but an empty value must not erase what the
+                # incoming row actually observed (the stronger-evidence branch filters too).
+                assets[position] = {
+                    **incoming,
+                    **{key: value for key, value in kept.items() if value not in (None, "")},
+                }
+        for candidate in run.website_candidates:
+            existing = candidates.get(candidate.domain)
+            if existing is None:
+                candidates[candidate.domain] = candidate.model_copy(deep=True)
+                continue
+            strongest = existing if _CANDIDATE_RANK.get(existing.status, 0) >= _CANDIDATE_RANK.get(candidate.status, 0) else candidate
+            candidates[candidate.domain] = existing.model_copy(
+                update={
+                    "status": strongest.status,
+                    "confidence": strongest.confidence,
+                    "evidence": list(dict.fromkeys([*existing.evidence, *candidate.evidence])),
+                    "hosts": list(dict.fromkeys([*existing.hosts, *candidate.hosts]))[:8],
+                }
+            )
+        merged.queries.extend(item.model_copy(update={"purpose": f"[{label}] {item.purpose}"}) for item in run.queries)
+        merged.reflection_notes.extend(f"[{label}] {note}" for note in run.reflection_notes)
+        for template in run.scan_template_ids:
+            if template not in templates:
+                templates.append(template)
+        for severity in run.scan_severities:
+            if severity not in severities:
+                severities.append(severity)
+        for target in run.scan_targets:
+            if target not in targets and len(targets) < 10_000:
+                targets.append(target)
+        if run.scan_recommended and run.scan_reason and run.scan_reason not in reasons:
+            reasons.append(f"{label}：{run.scan_reason}")
+        if run.stop_reason:
+            stops.append(f"{label}：{run.stop_reason}")
+        for name in run.organization_names:
+            if name not in organizations:
+                organizations.append(name)
+        for hypothesis in run.domain_hypotheses:
+            if hypothesis not in hypotheses:
+                hypotheses.append(hypothesis)
+    merged.assets = assets
+    merged.asset_confidence = confidences
+    merged.fields = fields or list(dict.fromkeys(key for asset in assets for key in asset))
+    merged.website_candidates = sorted(candidates.values(), key=lambda item: (item.status, item.domain))
+    merged.evidence_counts = {
+        strategy: sum(1 for value in confidences if value == strategy)
+        for strategy in EVIDENCE_RANK
+        if any(value == strategy for value in confidences)
+    }
+    # The merged list is deduplicated across engines, so the count must be the list length:
+    # summing per-engine counts would report one asset twice as "去重结果".
+    merged.result_count = len(assets)
+    # Cross-engine corroboration: an asset two engines independently indexed is much stronger
+    # evidence than one engine's single query.
+    merged.corroboration = {
+        "multi_engine": sum(1 for names in seen_by_engine.values() if len(names) > 1),
+        "single_engine": sum(1 for names in seen_by_engine.values() if len(names) == 1),
+    }
+    merged.assets_truncated = any(run.assets_truncated for _, run in per_engine)
+    for _, run in per_engine:
+        for key, value in run.age_filter.items():
+            merged.age_filter[key] = merged.age_filter.get(key, 0) + value
+    merged.scan_template_ids = templates
+    merged.scan_severities = align_scan_severities(templates, severities) if templates else severities
+    merged.scan_targets = targets
+    merged.scan_recommended = any(run.scan_recommended for _, run in per_engine)
+    merged.scan_reason = " ".join(reasons) if reasons else "未明确要求主动扫描。"
+    merged.stop_reason = "；".join(stops)
+    merged.organization_names = organizations
+    merged.domain_hypotheses = hypotheses
+    merged.query = merged.queries[0].query if merged.queries else None
+
+
+def _multi_summary_prompt(merged: AgentRun, intent: str, per_engine: list[tuple[str, AgentRun]]) -> str:
+    breakdown = [
+        {
+            "engine": engine_label(engine),
+            "records": run.result_count,
+            "queries": len(run.queries),
+            "stop_reason": run.stop_reason,
+        }
+        for engine, run in per_engine
+    ]
+    failures = {engine_label(engine): error.get("message") or error.get("code") for engine, error in merged.engine_errors.items()}
+    return (
+        f"{_search_summary_prompt(merged, intent)}\n"
+        f"Per-engine contribution: {json.dumps(breakdown, ensure_ascii=False)}\n"
+        + (f"Engines that failed: {json.dumps(failures, ensure_ascii=False)}\n" if failures else "")
+        + "Attribute findings to the engine that produced them when it matters, and name any engine whose results are missing."
+    )
+
+
+class MultiEngineAgent:
+    """Run the workflow once per engine and merge the runs into one asset-mapping briefing.
+
+    Each engine plans with its own syntax rules (queries are never translated across engines),
+    then the runs are merged on the shared asset identity, so one briefing covers FOFA's
+    fingerprint/filing view, Shodan's service/CVE view and Hunter's component/filing metadata.
+    A single engine failing keeps the other engines' results and records the failure instead of
+    discarding the run. Non-list intents (host profile, statistics, favicon) are delegated to the
+    first engine that accepts them, because only that engine's payload can be rendered.
+    """
+
+    def __init__(
+        self,
+        engines: Sequence[str],
+        router: ProviderRouter,
+        *,
+        engine_factory: Callable[[str], AssetSearchEngine] = create_engine,
+    ) -> None:
+        self.engines = tuple(engines)
+        self.router = router
+        self._engine_factory = engine_factory
+
+    async def run(
+        self,
+        intent: str,
+        *,
+        max_records: int = 1000,
+        max_pages: int = 10,
+        fields: list[str] | None = None,
+        smart_fields: bool = True,
+        min_evidence: str | None = None,
+        ensure_timestamp: bool = False,
+        on_progress: AgentProgressCallback | None = None,
+        on_page: AgentPageCallback | None = None,
+    ) -> AgentRun:
+        run = AgentRun(intent=intent, engine=MULTI_ENGINE, action=AgentAction.MULTI_SEARCH)
+        remaining = max(1, max_records)
+        engines_left = len(self.engines)
+        completed: list[tuple[str, AgentRun]] = []
+        for engine in self.engines:
+            label = engine_label(engine)
+            # Split the caller's budget across the engines that have not run yet, so the merged
+            # result stays inside max_records instead of multiplying it by the engine count.
+            budget = max(1, remaining // max(1, engines_left))
+            engines_left -= 1
+            _record_step(
+                run,
+                AgentState.INTENT,
+                f"正在用 {label} 独立规划与检索（本引擎预算 {budget:,} 条）",
+                data={"engine": engine, "budget": budget},
+                on_progress=on_progress,
+            )
+            try:
+                async with self._engine_factory(engine) as client:
+                    engine_run = await AssetAgent(client, self.router).run(
+                        intent,
+                        max_records=budget,
+                        max_pages=max_pages,
+                        fields=fields,
+                        smart_fields=smart_fields,
+                        min_evidence=min_evidence,
+                        ensure_timestamp=ensure_timestamp,
+                        on_progress=_mirror_steps(engine, run, on_progress),
+                        on_page=on_page,
+                    )
+            except FofaError as exc:
+                run.engine_errors[engine] = exc.as_dict()
+                _record_step(run, AgentState.FAILED, f"{label} 检索失败：{exc.message}", data=exc.as_dict(), on_progress=on_progress)
+                continue
+            if engine_run.error:
+                run.engine_errors[engine] = dict(engine_run.error)
+                _record_step(
+                    run,
+                    AgentState.FAILED,
+                    f"{label} 检索失败：{engine_run.error.get('message') or engine_run.error.get('code')}",
+                    data=engine_run.error,
+                    on_progress=on_progress,
+                )
+                continue
+            if engine_run.action not in SEARCH_ACTIONS:
+                # A host profile, statistics or favicon payload can only be rendered by the engine
+                # that produced it, so the intent is delegated instead of merged and discarded.
+                _record_step(
+                    run,
+                    AgentState.INTENT,
+                    f"{label} 将意图判定为 {engine_run.action.value}；该动作不可跨引擎合并，已由 {label} 单独完成",
+                    data={"engine": engine, "action": engine_run.action.value},
+                    on_progress=on_progress,
+                )
+                return self._finish(_adopt_engine_run(run, engine, engine_run))
+            completed.append((engine, engine_run))
+            _record_step(
+                run,
+                AgentState.EVALUATE,
+                f"{label} 完成：{engine_run.result_count:,} 条去重资产，{len(engine_run.queries)} 个查询策略",
+                data={"engine": engine, "records": engine_run.result_count, "queries": len(engine_run.queries)},
+                on_progress=on_progress,
+            )
+            remaining = max(1, remaining - engine_run.result_count)
+        if not completed:
+            run.error = dict(next(iter(run.engine_errors.values()), {"code": "agent_error", "message": "所有引擎均失败"}))
+            _record_step(run, AgentState.FAILED, "所有引擎均失败，未生成资产测绘结果", data=run.error, on_progress=on_progress)
+            return self._finish(run)
+        _merge_runs(run, completed)
+        if len(run.assets) > max_records:
+            # The per-engine budgets are computed from the engines still to run, so a late engine
+            # can still overshoot the caller's cap; the merged list is trimmed to honour it.
+            run.assets = run.assets[:max_records]
+            run.asset_confidence = run.asset_confidence[:max_records]
+            run.result_count = len(run.assets)
+            run.assets_truncated = True
+        _record_step(
+            run,
+            AgentState.EVALUATE,
+            f"合并完成：{len(run.assets):,} 条去重资产，覆盖 {len(run.fields)} 个字段",
+            data={"engines": [engine for engine, _ in completed], "assets": len(run.assets), "fields": run.fields},
+            on_progress=on_progress,
+        )
+        _record_step(run, AgentState.SUMMARIZE, "正在合并多路证据生成资产测绘简报", on_progress=on_progress)
+        summary = await self.router.generate(
+            "summarizer",
+            system=briefing_system(engine_label(MULTI_ENGINE)),
+            prompt=_multi_summary_prompt(run, intent, completed),
+        )
+        _apply_generated_summary(run, summary.text, fallback=_local_search_summary(run), require_asset_briefing=True)
+        _record_step(run, AgentState.COMPLETED, "多引擎资产测绘完成", on_progress=on_progress)
+        return self._finish(run)
+
+    def _finish(self, run: AgentRun) -> AgentRun:
+        run.route_events = [event.model_dump(mode="json") for event in self.router.events]
+        return run

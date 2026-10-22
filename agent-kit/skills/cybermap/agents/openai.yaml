@@ -1,0 +1,12 @@
+interface:
+  display_name: "CyberMap"
+  short_description: "Search and analyze FOFA assets safely"
+  default_prompt: "Use $cybermap to validate and run a bounded FOFA asset search."
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "cybermap"
+      description: "Local CyberMap MCP server"
+      transport: "stdio"
+policy:
+  allow_implicit_invocation: true

@@ -5,38 +5,21 @@ from __future__ import annotations
 import asyncio
 import base64
 import random
-import time
 from collections.abc import AsyncIterator
-from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
 from config import settings
+from core.cache import PageCache, request_cache_key, resolve_cache
 from core.fields import fofa_request_fields
 from core.membership import capability_error, capped_requests_per_second, membership_from_account
-from core.models import AssetRecord, FofaError, FofaErrorCode, SearchPage, SearchRequest
-
-
-class _RateLimiter:
-    def __init__(self, requests_per_second: float):
-        self._interval = 1.0 / requests_per_second
-        self._next = 0.0
-        self._lock = asyncio.Lock()
-
-    async def wait(self) -> None:
-        async with self._lock:
-            now = time.monotonic()
-            if self._next > now:
-                await asyncio.sleep(self._next - now)
-            self._next = max(now, self._next) + self._interval
+from core.models import AssetRecord, FofaError, FofaErrorCode, SearchPage, SearchRequest, redact_secrets
+from core.ratelimit import RateLimiter, retry_after_seconds
 
 
 class FofaClient:
-    MAX_RETRY_DELAY = 30.0
-
     def __init__(
         self,
         *,
@@ -47,7 +30,9 @@ class FofaClient:
         max_retries: int = 3,
         requests_per_second: float | None = None,
         concurrency: int | None = None,
+        cache: PageCache | None | bool = True,
     ) -> None:
+        self.name = "fofa"
         self.base_url = (base_url or settings.fofa.base_url).rstrip("/")
         self.email = settings.fofa.email if email is None else email
         self.key = settings.fofa.api_key if api_key is None else api_key
@@ -55,10 +40,13 @@ class FofaClient:
         self._client = client
         self._owns_client = client is None
         self._configured_rps = requests_per_second or settings.system.requests_per_second
-        self._limiter = _RateLimiter(self._configured_rps)
+        self._limiter = RateLimiter(self._configured_rps)
         self._semaphore = asyncio.Semaphore(concurrency or settings.system.concurrency)
+        self.cache = (resolve_cache() if cache is True else cache) or None
         self.user_info: dict[str, Any] | None = None
-        self.headers = {"User-Agent": "FofaMap/2.0.1"}
+        # Set when a rejected `next` cursor forced numbered pagination mid-run.
+        self.pagination_fallback = False
+        self.headers = {"User-Agent": "CyberMap/2.0.1"}
 
     async def __aenter__(self) -> FofaClient:
         await self._get_client()
@@ -118,8 +106,8 @@ class FofaClient:
                     response = await client.get(f"{self.base_url}{path}", params=request_params, headers=self.headers)
                 if response.status_code == 429 or response.status_code >= 500:
                     retry_after = response.headers.get("Retry-After")
-                    delay = self._retry_after_seconds(retry_after, 0.5 * (2**attempt))
-                    last_error = self._classify_error(response.text[:500] or "FOFA 请求失败", response.status_code)
+                    delay = retry_after_seconds(retry_after, 0.5 * (2**attempt))
+                    last_error = self._classify_error(self._scrub(response.text[:500]) or "FOFA 请求失败", response.status_code)
                     if attempt < self.max_retries:
                         await asyncio.sleep(delay + random.uniform(0, max(0.05, delay * 0.2)))
                         continue
@@ -132,28 +120,32 @@ class FofaClient:
                     ) from exc
                 if response.is_error or data.get("error"):
                     error = self._classify_error(
-                        str(data.get("errmsg") or data.get("message") or response.text[:500]), response.status_code
+                        self._scrub(str(data.get("errmsg") or data.get("message") or response.text[:500])), response.status_code
                     )
                     if error.retryable and attempt < self.max_retries:
-                        delay = self._retry_after_seconds(response.headers.get("Retry-After"), 0.5 * (2**attempt))
+                        delay = retry_after_seconds(response.headers.get("Retry-After"), 0.5 * (2**attempt))
                         await asyncio.sleep(delay + random.uniform(0, max(0.05, delay * 0.2)))
                         last_error = error
                         continue
                     raise error
                 return data
             except (httpx.TimeoutException, httpx.NetworkError) as exc:
-                last_error = FofaError(FofaErrorCode.TRANSPORT_ERROR, str(exc), retryable=True)
+                last_error = FofaError(FofaErrorCode.TRANSPORT_ERROR, self._scrub(str(exc)), retryable=True)
                 if attempt >= self.max_retries:
                     raise last_error from exc
                 await asyncio.sleep(0.5 * (2**attempt) + random.uniform(0, 0.2))
         raise last_error or FofaError(FofaErrorCode.TRANSPORT_ERROR, "FOFA 请求失败")
+
+    def _scrub(self, text: str) -> str:
+        """Never surface upstream text that may echo the credential-bearing request URI."""
+        return redact_secrets(text, self.key, self.email)
 
     def _apply_membership_rate_limit(self) -> None:
         membership = membership_from_account(self.user_info)
         if membership is None:
             return
         capped = capped_requests_per_second(self._configured_rps, membership.vip_level)
-        self._limiter = _RateLimiter(capped)
+        self._limiter = RateLimiter(capped)
 
     async def _require_api(self, api: str) -> None:
         if self.user_info is None:
@@ -178,23 +170,12 @@ class FofaClient:
     def _encode_query(query: str) -> str:
         return base64.b64encode(query.encode("utf-8")).decode("ascii")
 
-    @classmethod
-    def _retry_after_seconds(cls, value: str | None, fallback: float) -> float:
-        if value:
-            try:
-                return min(cls.MAX_RETRY_DELAY, max(0.0, float(value.strip())))
-            except ValueError:
-                try:
-                    retry_at = parsedate_to_datetime(value)
-                    if retry_at.tzinfo is None:
-                        retry_at = retry_at.replace(tzinfo=timezone.utc)
-                    delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
-                    return min(cls.MAX_RETRY_DELAY, max(0.0, delay))
-                except (TypeError, ValueError, OverflowError):
-                    pass
-        return min(cls.MAX_RETRY_DELAY, max(0.0, fallback))
-
     async def search_page(self, request: SearchRequest) -> SearchPage:
+        cache_key = request_cache_key(self.name, request) if self.cache else None
+        if cache_key is not None:
+            hit = self.cache.get(cache_key)
+            if hit is not None:
+                return hit
         fields = fofa_request_fields(request.fields) or list(request.fields)
         params: dict[str, Any] = {
             "qbase64": self._encode_query(request.query),
@@ -217,7 +198,7 @@ class FofaClient:
         consumed = data.get("consumed_fpoint")
         if consumed is None:
             consumed = data.get("consumed", data.get("cost"))
-        return SearchPage(
+        page = SearchPage(
             records=records,
             fields=actual_fields,
             total=data.get("size") if isinstance(data.get("size"), int) else data.get("total"),
@@ -227,6 +208,12 @@ class FofaClient:
             query=request.query,
             metadata={k: v for k, v in data.items() if k not in {"results", "fields", "next", "next_cursor"}},
         )
+        if cache_key is not None:
+            self.cache.put(cache_key, page)
+        return page
+        if cache_key is not None:
+            self.cache.put(cache_key, page)
+        return page
 
     async def iter_search(self, request: SearchRequest) -> AsyncIterator[SearchPage]:
         cursor = request.cursor
@@ -234,14 +221,30 @@ class FofaClient:
         # start_page > 1 uses FOFA's numbered /search/all window (2.0 semantics).
         # Page 1 keeps cursor pagination so large exports stay continuous.
         use_cursor = bool(request.cursor) or request.continuous or request.page <= 1
+        self.pagination_fallback = False
         seen: set[tuple[Any, ...]] = set()
         emitted = 0
         spent = 0.0
+        fetched_pages = 0
         for _ in range(request.max_pages):
             page_request = request.model_copy(
                 update={"cursor": cursor if use_cursor else None, "page": page_number, "continuous": use_cursor}
             )
-            page = await self.search_page(page_request)
+            try:
+                page = await self.search_page(page_request)
+            except FofaError as exc:
+                # Some FOFA deployments and mirrors do not honor the `next` cursor ("[40070] 游标无效或过期").
+                # Once a page has been fetched, fall back to numbered pages for the rest of the run
+                # instead of losing the whole window; the equivalent page number is the count of
+                # pages already fetched. The message is matched because FOFA reports this with a
+                # generic code.
+                if use_cursor and fetched_pages and "游标" in exc.message:
+                    use_cursor = False
+                    page_number = fetched_pages + 1
+                    self.pagination_fallback = True
+                    continue
+                raise
+            fetched_pages += 1
             raw_count = len(page.records)
             if request.dedupe_by:
                 filtered: list[AssetRecord] = []
@@ -255,6 +258,8 @@ class FofaClient:
                 page.records = page.records[: request.max_records - emitted]
             emitted += len(page.records)
             spent += float(page.consumed or 0)
+            if self.pagination_fallback:
+                page.metadata["pagination"] = "numbered_fallback"
             yield page
             if emitted >= request.max_records or raw_count == 0:
                 break

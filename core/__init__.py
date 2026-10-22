@@ -1,1 +1,1 @@
-"""FofaMap core contracts and workflows."""
+"""CyberMap core contracts and workflows."""

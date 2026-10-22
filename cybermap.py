@@ -1,4 +1,4 @@
-"""FofaMap 2.0.1 命令行：完整保留 2.0 交互模型，面向人工操作。"""
+"""CyberMap 2.0.1 命令行：完整保留 2.0 交互模型，面向人工操作。"""
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from collections.abc import AsyncIterator
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -21,8 +21,30 @@ import rich_click as click
 import yaml
 from rich.live import Live
 
-from config import config_write_path, settings
-from core.client import FofaClient
+from config import (
+    CENSYS_API_TOKEN_ENV,
+    CENSYS_KEYRING_SERVICE,
+    DAYDAYMAP_API_KEY_ENV,
+    DAYDAYMAP_KEYRING_SERVICE,
+    HUNTER_API_KEY_ENV,
+    HUNTER_KEYRING_SERVICE,
+    SHODAN_API_KEY_ENV,
+    SHODAN_KEYRING_SERVICE,
+    config_write_path,
+    settings,
+)
+from core.engines import (
+    AGENT_ENGINES,
+    MULTI_ENGINE,
+    AssetSearchEngine,
+    create_engine,
+    default_fields,
+    engine_label,
+    favicon_query,
+    normalize_engine,
+    supported_fields,
+    timestamp_field,
+)
 from core.exporter import StreamingXlsxWorkbook, export_pages, records_to_pages
 from core.fields import field_catalog
 from core.models import AssetRecord, FofaError, SearchPage, SearchRequest
@@ -33,13 +55,17 @@ from utils.cli_ui import (
     print_banner,
     render_account,
     render_agent,
+    render_censys_account,
+    render_daydaymap_account,
     render_error,
     render_host,
+    render_hunter_account,
     render_nuclei_results,
     render_query_overview,
     render_scan_approval,
     render_search_page,
     render_search_summary,
+    render_shodan_account,
     render_stats,
     section,
 )
@@ -69,6 +95,7 @@ _OPTION_GROUPS = [
     {
         "name": "🔮 查询与分析",
         "options": [
+            "--engine",
             "--ai-query",
             "--query",
             "--host-query",
@@ -122,7 +149,7 @@ _OPTION_GROUPS = [
         ],
     },
 ]
-click.rich_click.OPTION_GROUPS = {"fofamap.py": _OPTION_GROUPS, "fofamap": _OPTION_GROUPS}
+click.rich_click.OPTION_GROUPS = {"cybermap.py": _OPTION_GROUPS, "cybermap": _OPTION_GROUPS}
 
 
 _SUPPORT_LABELS = {
@@ -142,6 +169,99 @@ def _support_label(value: str) -> str:
 
 def _fields(value: str | None) -> list[str]:
     return [item.strip() for item in (value or settings.search.fields).split(",") if item.strip()]
+
+
+def _engine_of(client: AssetSearchEngine) -> str:
+    """Engines declare `name`; FOFA-shaped clients without it keep the FOFA semantics."""
+    return normalize_engine(getattr(client, "name", "fofa"))
+
+
+def _resolve_engine_scope(value: str | None) -> str:
+    """`all` selects the merged multi-engine agent; anything else must be one engine."""
+    scope = (value or "fofa").strip().lower()
+    if scope == MULTI_ENGINE:
+        return MULTI_ENGINE
+    return normalize_engine(scope)
+
+
+def _render_account_panel(engine: str, data: dict[str, Any]) -> None:
+    """Each engine reports its own account shape (FOFA membership, Shodan plan, Hunter points)."""
+    if engine == "shodan":
+        render_shodan_account(data)
+    elif engine == "hunter":
+        render_hunter_account(data)
+    elif engine == "daydaymap":
+        render_daydaymap_account(data)
+    elif engine == "censys":
+        render_censys_account(data)
+    else:
+        render_account(data)
+
+
+# `--full` is "more data" in every engine, but what that means differs.
+_FULL_LABELS = {
+    "fofa": "历史数据",
+    "shodan": "完整 Banner（关闭 minify）",
+    "hunter": "完整 Banner / Header / 证书",
+    # Both of these return the full record set; there is no lighter mode to turn off.
+    "daydaymap": "完整字段（关闭字段裁剪）",
+    "censys": "服务详情（主机画像始终返回完整响应）",
+}
+
+
+def _full_label(engine: str | None) -> str:
+    """Label `--full` for one engine, or generically for the merged multi-engine scope."""
+    scope = (engine or "fofa").strip().lower()
+    return _FULL_LABELS.get(scope, "完整数据")
+
+
+def _timestamp_field_for(engine: str, client: Any) -> str | None:
+    """The engine's last-seen column, or None when this account cannot return it.
+
+    FOFA gates `lastupdatetime` behind a membership tier; Shodan and Hunter always answer theirs.
+    """
+    field = timestamp_field(engine)
+    if normalize_engine(engine) != "fofa":
+        return field
+    from core.fields import account_tier, available_fields
+
+    user_info = getattr(client, "user_info", None) or {}
+    tier = account_tier(user_info.get("vip_level", user_info.get("level")))
+    return field if field in available_fields(tier) else None
+
+
+def _engine_fields(engine: str, options: dict[str, Any], client: Any = None) -> list[str]:
+    """Return the field list for the active engine.
+
+    An explicit `-f` is a hard contract and the engine rejects what it cannot return. Fields that
+    came from configuration belong to the default engine, so a FOFA-only column would otherwise
+    abort a Shodan/Hunter run: unsupported ones are dropped with a visible note instead. The
+    freshness filter additionally requires the engine's own last-seen column.
+    """
+    configured = _fields(options.get("query_fields"))
+    if options.get("query_fields"):
+        fields = configured
+    else:
+        supported = supported_fields(engine)
+        fields = configured
+        if supported is not None:
+            kept = [field for field in configured if field in supported]
+            if kept != configured:
+                fields = kept or list(default_fields(engine))
+                if not _machine_output(options):
+                    console.print(
+                        f"[yellow]配置的返回字段含 {engine_label(engine)} 无法返回的列，本次已改用：{', '.join(fields)}[/]"
+                    )
+    if options.get("max_age_days"):
+        column = _timestamp_field_for(engine, client)
+        if column:
+            fields = list(dict.fromkeys([*fields, column]))
+        elif not _machine_output(options):
+            console.print(
+                f"[yellow]{engine_label(engine)} 当前账号不返回时间戳字段；该引擎结果将按“无时间戳”保留，"
+                "无法参与新鲜度过滤。[/]"
+            )
+    return fields
 
 
 def _use_smart_fields(options: dict[str, Any]) -> bool:
@@ -174,7 +294,7 @@ def _wizard(options: dict[str, Any]) -> dict[str, Any] | None:
     import questionary
     from questionary import Choice, Separator
 
-    section("FofaMap 智能向导", "方向键选择，回车确认")
+    section("CyberMap 智能向导", "方向键选择，回车确认")
     mode = questionary.select(
         "请选择要执行的操作：",
         choices=[
@@ -264,14 +384,17 @@ def _wizard(options: dict[str, Any]) -> dict[str, Any] | None:
                 return None
             if field_mode == "smart":
                 options["smart_fields"] = True
-                console.print("[dim]将按 FOFA 账号等级和当前任务自动选择字段与字段数。[/]")
+                console.print(
+                    f"[dim]将按 {engine_label(settings.search.engine)} 的字段目录与账号能力，结合当前任务自动选择字段。[/]"
+                )
             else:
                 options["smart_fields"] = False
                 fields_value = questionary.text("返回字段：", default=settings.search.fields).ask()
                 if fields_value is None:
                     return None
                 options["query_fields"] = fields_value
-            full_value = questionary.confirm("查询 FOFA 历史数据？", default=settings.search.full).ask()
+            full_label = _full_label(settings.search.engine)
+            full_value = questionary.confirm(f"查询 {full_label}？", default=settings.search.full).ask()
             if full_value is None:
                 return None
             options["full"] = full_value
@@ -362,13 +485,21 @@ def _interactive_init() -> int:
     import questionary
     from questionary import Choice
 
-    section("FofaMap 安全初始化向导", "优先系统钥匙串，可确认写入本地 YAML")
+    section("CyberMap 安全初始化向导", "优先系统钥匙串，可确认写入本地 YAML")
     email = questionary.text("FOFA 邮箱（当前接口可选）：", default=settings.fofa.email).ask()
     if email is None:
         return 130
     key = questionary.password("FOFA API 密钥（优先保存到系统钥匙串）：").ask()
     if key is None:
         return 130
+    shodan_key = questionary.password("Shodan API 密钥（可选，优先保存到系统钥匙串，回车跳过）：").ask() or ""
+    hunter_key = questionary.password("Hunter（奇安信鹰图）API 密钥（可选，优先保存到系统钥匙串，回车跳过）：").ask() or ""
+    censys_token = questionary.password(
+        "Censys Platform 个人访问令牌 censys_...（可选，优先保存到系统钥匙串，回车跳过）："
+    ).ask() or ""
+    daydaymap_key = questionary.password(
+        "DayDayMap API Key（可选，个人中心获取，优先保存到系统钥匙串，回车跳过）："
+    ).ask() or ""
     provider_name = questionary.select(
         "选择 AI 提供商（普通命令行查询不需要 AI）：",
         choices=[
@@ -482,6 +613,10 @@ def _interactive_init() -> int:
         return 130
     config_data = {
         "fofa": {"base_url": settings.fofa.base_url, "email": email or ""},
+        "shodan": {"base_url": settings.shodan.base_url},
+        "hunter": {"base_url": settings.hunter.base_url},
+        "daydaymap": {"base_url": settings.daydaymap.base_url},
+        "censys": {"base_url": settings.censys.base_url},
         "search": {
             "fields": fields or settings.search.fields,
             "size": int(size_text),
@@ -509,17 +644,40 @@ def _interactive_init() -> int:
         "routing": routing,
     }
     target = config_write_path()
-    fofa_key_saved = _store_keyring("fofamap", email or "default", key or "")
-    provider_key_saved = _store_keyring("fofamap-provider", provider_key_env, provider_key)
+    fofa_key_saved = _store_keyring("cybermap", email or "default", key or "")
+    provider_key_saved = _store_keyring("cybermap-provider", provider_key_env, provider_key)
+    shodan_key_saved = _store_keyring(SHODAN_KEYRING_SERVICE, SHODAN_API_KEY_ENV, shodan_key)
+    hunter_key_saved = _store_keyring(HUNTER_KEYRING_SERVICE, HUNTER_API_KEY_ENV, hunter_key)
+    censys_token_saved = _store_keyring(CENSYS_KEYRING_SERVICE, CENSYS_API_TOKEN_ENV, censys_token)
+    daydaymap_key_saved = _store_keyring(DAYDAYMAP_KEYRING_SERVICE, DAYDAYMAP_API_KEY_ENV, daydaymap_key)
     failed_fofa_key = bool(key and not fofa_key_saved)
     failed_provider_key = bool(provider_key and not provider_key_saved)
+    failed_shodan_key = bool(shodan_key and not shodan_key_saved)
+    failed_hunter_key = bool(hunter_key and not hunter_key_saved)
+    failed_censys_token = bool(censys_token and not censys_token_saved)
+    failed_daydaymap_key = bool(daydaymap_key and not daydaymap_key_saved)
     secrets_in_yaml = False
-    if failed_fofa_key or failed_provider_key:
+    if (
+        failed_fofa_key
+        or failed_provider_key
+        or failed_shodan_key
+        or failed_hunter_key
+        or failed_censys_token
+        or failed_daydaymap_key
+    ):
         labels = []
         if failed_fofa_key:
             labels.append("FOFA_API_KEY")
         if failed_provider_key:
             labels.append(provider_key_env)
+        if failed_shodan_key:
+            labels.append(SHODAN_API_KEY_ENV)
+        if failed_hunter_key:
+            labels.append(HUNTER_API_KEY_ENV)
+        if failed_censys_token:
+            labels.append(CENSYS_API_TOKEN_ENV)
+        if failed_daydaymap_key:
+            labels.append(DAYDAYMAP_API_KEY_ENV)
         secrets_in_yaml = bool(
             questionary.confirm(
                 f"系统钥匙串不可用：{_keyring_unavailable_reason()}\n"
@@ -535,6 +693,14 @@ def _interactive_init() -> int:
                 config_data["fofa"]["api_key"] = key
             if failed_provider_key and provider_name:
                 config_data["providers"][provider_name]["api_key"] = provider_key
+            if failed_shodan_key:
+                config_data["shodan"]["api_key"] = shodan_key
+            if failed_hunter_key:
+                config_data["hunter"]["api_key"] = hunter_key
+            if failed_censys_token:
+                config_data["censys"]["api_token"] = censys_token
+            if failed_daydaymap_key:
+                config_data["daydaymap"]["api_key"] = daydaymap_key
     _save_setup_config(target, config_data, allow_secrets=secrets_in_yaml)
     console.print(f"[bold green]✓ 配置已写入：[/][cyan]{target}[/]")
     if secrets_in_yaml:
@@ -547,7 +713,15 @@ def _interactive_init() -> int:
             console.print("[yellow]FOFA 密钥未保存；请在启动前设置 FOFA_API_KEY。[/]")
         if failed_provider_key:
             console.print(f"[yellow]AI 密钥未保存；请在启动前设置 {provider_key_env}。[/]")
-    console.print("[dim]重新启动 FofaMap 后，新配置生效。[/]")
+        if failed_shodan_key:
+            console.print(f"[yellow]Shodan 密钥未保存；请在启动前设置 {SHODAN_API_KEY_ENV}。[/]")
+        if failed_hunter_key:
+            console.print(f"[yellow]Hunter 密钥未保存；请在启动前设置 {HUNTER_API_KEY_ENV}。[/]")
+        if failed_censys_token:
+            console.print(f"[yellow]Censys 令牌未保存；请在启动前设置 {CENSYS_API_TOKEN_ENV}。[/]")
+        if failed_daydaymap_key:
+            console.print(f"[yellow]DayDayMap Key 未保存；请在启动前设置 {DAYDAYMAP_API_KEY_ENV}。[/]")
+    console.print("[dim]重新启动 CyberMap 后，新配置生效。[/]")
     return 0
 
 
@@ -644,7 +818,7 @@ def _record_url(values: dict[str, Any]) -> str | None:
 
 
 def _needs_alive_probe(asset: dict[str, Any]) -> bool:
-    """Empty FOFA placeholders must not count as a completed HTTP probe."""
+    """Empty engine placeholders must not count as a completed HTTP probe."""
     if "alive_status" not in asset:
         return True
     value = asset.get("alive_status")
@@ -661,18 +835,68 @@ async def _maybe_await(value: Any) -> Any:
     return value
 
 
+def _record_timestamp(values: dict[str, Any]) -> datetime | None:
+    """Parse an engine's last-seen value (FOFA `lastupdatetime`, Shodan banner time, Hunter date)."""
+    # FOFA's last-seen column is `lastupdatetime` and is only renamed to `timestamp` when engines
+    # are merged, i.e. after this per-page filter has run.
+    raw = str(values.get("timestamp") or values.get("lastupdatetime") or "").strip()
+    if not raw:
+        return None
+    text = raw.replace("T", " ").split(".")[0].split("+")[0].strip()
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+    return None
+
+
+def _apply_age_filter(
+    assets: list[dict[str, Any]],
+    *,
+    max_age_days: int | None,
+) -> tuple[list[dict[str, Any]], dict[str, int]]:
+    """Drop rows the engines last confirmed longer ago than the caller allows.
+
+    Engine-side date operators are deliberately not used: measured against the live APIs, Shodan's
+    `after:` collapsed a 52.9M-result query to 140 rows and FOFA's `after=` was not even monotone,
+    while each engine does report its own last-seen time. Rows without a parseable time are kept
+    and counted, because a missing value must not silently read as fresh.
+    """
+    if not max_age_days:
+        return assets, {}
+    cutoff = datetime.now() - timedelta(days=int(max_age_days))
+    kept: list[dict[str, Any]] = []
+    dropped = 0
+    unknown = 0
+    for asset in assets:
+        seen = _record_timestamp(asset)
+        if seen is None:
+            unknown += 1
+            kept.append(asset)
+        elif seen >= cutoff:
+            kept.append(asset)
+        else:
+            dropped += 1
+    return kept, {"dropped": dropped, "unknown": unknown}
+
+
 async def _apply_alive_and_local_filters(
     assets: list[dict[str, Any]],
     *,
     fields: list[str],
     options: dict[str, Any],
-) -> tuple[list[dict[str, Any]], list[str]]:
-    """Apply include, optional HTTP alive checks, then keyword search. Same order as classic mode."""
+) -> tuple[list[dict[str, Any]], list[str], dict[str, int]]:
+    """Apply age, include, optional HTTP alive checks, then keyword search - in that order."""
     include = {item.strip() for item in (options.get("include") or "").split(",") if item.strip()}
     check_alive = bool(options.get("check_alive"))
     needles = [item.strip().lower() for item in (options.get("key_word") or "").split(",") if item.strip()]
+    max_age_days = options.get("max_age_days")
+    if not assets:
+        return assets, fields, {}
+    assets, age_stats = _apply_age_filter(assets, max_age_days=max_age_days)
     if not assets or (not include and not check_alive and not needles):
-        return assets, fields
+        return assets, fields, age_stats
     has_status_code = _assets_have_status_code(assets, fields)
     if include and has_status_code:
         assets = [asset for asset in assets if str(asset.get("status_code")) in include]
@@ -688,7 +912,7 @@ async def _apply_alive_and_local_filters(
             assets = [asset for asset in assets if str(asset.get("alive_status")) in include]
     if needles:
         assets = [asset for asset in assets if any(needle in str(asset).lower() for needle in needles)]
-    return assets, fields
+    return assets, fields, age_stats
 
 
 async def _apply_agent_result_filters(run: Any, options: dict[str, Any], *, machine: bool) -> None:
@@ -709,7 +933,7 @@ async def _apply_agent_result_filters(run: Any, options: dict[str, Any], *, mach
         status = console.status(f"[cyan]正在对 {before} 条 AI 资产做存活检测与过滤…[/]", spinner="dots")
         status.start()
     try:
-        filtered, fields = await _apply_alive_and_local_filters(
+        filtered, fields, age_stats = await _apply_alive_and_local_filters(
             run.assets,
             fields=list(run.fields),
             options=options,
@@ -717,6 +941,18 @@ async def _apply_agent_result_filters(run: Any, options: dict[str, Any], *, mach
     finally:
         if status:
             status.stop()
+    if age_stats.get("dropped"):
+        from core.agent import AgentState, AgentStep
+
+        run.steps.append(
+            AgentStep(
+                state=AgentState.EVALUATE,
+                detail=(
+                    f"已按最近 {options.get('max_age_days')} 天新鲜度过滤：丢弃 {age_stats['dropped']} 条陈旧资产，"
+                    f"{age_stats.get('unknown', 0)} 条无时间戳按保留处理"
+                ),
+            )
+        )
     kept_ids = {id(asset) for asset in filtered}
     run.assets = filtered
     run.fields = fields
@@ -748,47 +984,73 @@ async def _decorate_pages(
     *,
     options: dict[str, Any],
     counters: dict[str, Any],
+    engine: str = "fofa",
 ) -> AsyncIterator[SearchPage]:
     machine = _machine_output(options)
-    async for page in pages:
-        counters["pages"] += 1
-        values = [record.values for record in page.records]
-        values, page.fields = await _apply_alive_and_local_filters(values, fields=page.fields, options=options)
-        page.records = [AssetRecord(values=item) for item in values]
-        for record in page.records:
-            target = _record_url(record.values)
-            if target and target not in counters["targets"]:
-                counters["targets"].append(target)
-        counters["records"] += len(page.records)
-        if machine:
-            _emit_json(page, options["output_format"])
-        else:
-            render_search_page(page, counters["pages"], options.get("display_rows") or min(100, len(page.records)))
-        yield page
+    try:
+        async for page in pages:
+            counters["pages"] += 1
+            values = [record.values for record in page.records]
+            values, page.fields, age_stats = await _apply_alive_and_local_filters(
+                values, fields=page.fields, options=options
+            )
+            counters["stale_dropped"] = counters.get("stale_dropped", 0) + age_stats.get("dropped", 0)
+            counters["stale_unknown"] = counters.get("stale_unknown", 0) + age_stats.get("unknown", 0)
+            page.records = [AssetRecord(values=item) for item in values]
+            for record in page.records:
+                target = _record_url(record.values)
+                if target and target not in counters["targets"]:
+                    counters["targets"].append(target)
+            counters["records"] += len(page.records)
+            if page.metadata.get("pagination") == "numbered_fallback":
+                counters["pagination_fallback"] = True
+            if page.metadata.get("cached"):
+                counters["cache_hits"] = counters.get("cache_hits", 0) + 1
+            if machine:
+                _emit_json(page, options["output_format"])
+            else:
+                render_search_page(
+                    page,
+                    counters["pages"],
+                    options.get("display_rows") or min(100, len(page.records)),
+                    engine=engine,
+                )
+            yield page
+    except FofaError as exc:
+        # A failure on a continuation page must not discard the pages that were already displayed
+        # and exported; only a first-page failure stays fatal.
+        if not counters["pages"]:
+            raise
+        counters["partial_error"] = exc.message
+        if not machine:
+            console.print(
+                f"[yellow]分页在第 {counters['pages'] + 1} 页中断（{exc.message}）；"
+                f"已保留前 {counters['pages']} 页结果。[/]"
+            )
 
 
-async def _account(client: FofaClient, machine: bool) -> dict[str, Any]:
+async def _account(client: AssetSearchEngine, machine: bool) -> dict[str, Any]:
+    engine = _engine_of(client)
     if machine:
         return await client.account()
-    with console.status("[cyan]正在验证 FOFA 账号与能力…[/]", spinner="dots"):
+    with console.status(f"[cyan]正在验证 {engine_label(engine)} 账号与能力…[/]", spinner="dots"):
         data = await client.account()
     if not machine:
-        render_account(data)
+        _render_account_panel(engine, data)
     return data
 
 
-async def _run_searches(client: FofaClient, queries: list[str], options: dict[str, Any]) -> None:
+async def _run_searches(client: AssetSearchEngine, queries: list[str], options: dict[str, Any]) -> None:
     from core.scans import default_nuclei_template_ids
 
+    engine = _engine_of(client)
     if _use_smart_fields(options):
-        from core.fields import account_tier, merge_return_fields
+        from core.agent_profiles import agent_profile
 
-        user_info = getattr(client, "user_info", None) or {}
-        tier = account_tier(user_info.get("vip_level", user_info.get("level")))
         intent = str(options.get("ai_query") or options.get("icon_query") or " ".join(queries))
-        fields = merge_return_fields([], account_tier_name=tier, intent=f"{intent} {' '.join(queries)}")
+        fields = agent_profile(client).suggest_fields([], intent=f"{intent} {' '.join(queries)}")
     else:
-        fields = _fields(options.get("query_fields"))
+        fields = _engine_fields(engine, options, client)
     start_page, pages = _search_window(options)
     size = options.get("size") or settings.search.size
     save = options.get("save", True)
@@ -811,8 +1073,20 @@ async def _run_searches(client: FofaClient, queries: list[str], options: dict[st
     try:
         for index, query in enumerate(queries, start=1):
             if not _machine_output(options):
-                section("FOFA 资产检索", f"任务 {index}/{len(queries)}")
-                render_query_overview(query, fields, pages, size, options.get("full", False))
+                section(f"{engine_label(engine)} 资产检索", f"任务 {index}/{len(queries)}")
+                render_query_overview(
+                    query,
+                    fields,
+                    pages,
+                    size,
+                    options.get("full", False),
+                    full_label=_full_label(engine),
+                    max_age_days=options.get("max_age_days"),
+                    # A Censys host lookup returns every service of one IP in a single paid call.
+                    budget_label=(
+                        "1 次主机查询（返回该 IP 的全部服务，不分页）" if engine == "censys" else None
+                    ),
+                )
             request = SearchRequest(
                 query=query,
                 fields=fields,
@@ -825,14 +1099,18 @@ async def _run_searches(client: FofaClient, queries: list[str], options: dict[st
             )
             counters: dict[str, Any] = {"pages": 0, "records": 0, "targets": []}
             started = time.monotonic()
-            decorated = _decorate_pages(client.iter_search(request), options=options, counters=counters)
+            decorated = _decorate_pages(client.iter_search(request), options=options, counters=counters, engine=engine)
             artifact: Path | None = None
-            status = None if _machine_output(options) else console.status("[cyan]正在请求 FOFA 连续分页…[/]", spinner="dots")
+            status = (
+                None
+                if _machine_output(options)
+                else console.status(f"[cyan]正在请求 {engine_label(engine)} 连续分页…[/]", spinner="dots")
+            )
             if status:
                 status.start()
             try:
                 if workbook is not None:
-                    workbook.start_sheet(_run_slug(query) if len(queries) > 1 else "FOFA assets")
+                    workbook.start_sheet(_run_slug(query) if len(queries) > 1 else f"{engine_label(engine)} assets")
                     async for page in decorated:
                         workbook.write_page(page)
                     artifact = workbook.destination
@@ -855,13 +1133,26 @@ async def _run_searches(client: FofaClient, queries: list[str], options: dict[st
                     artifact=str(artifact) if artifact else None,
                     elapsed=time.monotonic() - started,
                 )
+                if counters.get("stale_dropped"):
+                    console.print(
+                        f"[yellow]新鲜度过滤：丢弃 {counters['stale_dropped']:,} 条超出 "
+                        f"{options.get('max_age_days')} 天的记录；{counters.get('stale_unknown', 0):,} 条无时间戳已保留。[/]"
+                    )
+                if counters.get("cache_hits"):
+                    console.print(
+                        f"[green]缓存命中 {counters['cache_hits']:,} 页：直接复用已付费结果，本次未重复消耗额度。[/]"
+                    )
+                if counters.get("pagination_fallback"):
+                    console.print("[yellow]该引擎拒绝了 next 游标，本次已自动改用页码分页继续拉取。[/]")
+                if counters.get("partial_error"):
+                    console.print(f"[yellow]本次分页未跑完：{counters['partial_error']}[/]")
             if options.get("nuclei"):
                 scan_dir = Path(options.get("_run_dir") or options.get("outdir") or settings.system.output_dir)
                 await _approve_and_execute_scan(
                     targets=counters["targets"][: options.get("scan_max_targets") or 200],
                     template_ids=list(options.get("nuclei_ids") or default_nuclei_template_ids()),
                     severities=[item.strip() for item in (options.get("severity") or "medium,high,critical").split(",") if item.strip()],
-                    reason="用户通过经典模式 -n/--nuclei 明确请求对本次 FOFA 结果执行扫描。",
+                    reason=f"用户通过经典模式 -n/--nuclei 明确请求对本次 {engine_label(engine)} 结果执行扫描。",
                     options=options,
                     machine=_machine_output(options),
                     directory_name=str((scan_dir / f"nuclei_{index}_{datetime.now().strftime('%Y%m%d_%H%M%S')}").resolve()),
@@ -875,47 +1166,110 @@ async def _run_searches(client: FofaClient, queries: list[str], options: dict[st
         targets_path.write_text("\n".join(all_targets) + "\n", encoding="utf-8")
 
 
-def _normalize_batch_query(value: str) -> str:
+_BATCH_DOMAIN_PATTERN = re.compile(
+    r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}"
+)
+# Clue -> filter rendering per engine. Hunter calls a registrable domain `domain.suffix` and,
+# like FOFA, ORs through `||`; Shodan ORs inside one comma-separated filter value instead.
+_BATCH_DOMAIN_FIELD = {"fofa": "domain", "hunter": "domain.suffix", "daydaymap": "domain"}
+_BATCH_GROUP_PATTERNS = {
+    "fofa": re.compile(r'^(ip|domain)="([^"\\]+)"$'),
+    "hunter": re.compile(r'^(ip|domain\.suffix)="([^"\\]+)"$'),
+    # DayDayMap accepts FOFA-style `||` grouping inside parentheses (verified live).
+    "daydaymap": re.compile(r'^(ip|domain)="([^"\\]+)"$'),
+}
+
+
+def _normalize_batch_query(value: str, engine: str = "fofa") -> str:
+    """Render one batch line as a query in the selected engine's syntax."""
     candidate = value.strip()
+    selected = normalize_engine(engine)
     try:
         ipaddress.ip_address(candidate)
-        return f'ip="{candidate}"'
     except ValueError:
         pass
-    if re.fullmatch(r"(?=.{1,253}$)(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}", candidate):
-        return f'domain="{candidate.lower()}"'
+    else:
+        return f"ip:{candidate}" if selected == "shodan" else f'ip="{candidate}"'
+    if _BATCH_DOMAIN_PATTERN.fullmatch(candidate):
+        domain = candidate.lower()
+        if selected == "shodan":
+            return f"domain:{domain}"
+        if selected == "censys":
+            # Censys Free has no search API: a domain line cannot be translated.
+            return candidate
+        return f'{_BATCH_DOMAIN_FIELD[selected]}="{domain}"'
     return candidate
 
 
-def _load_batch(path_value: str) -> list[str]:
+def _load_batch(path_value: str, engine: str = "fofa") -> list[str]:
     path = Path(path_value).expanduser()
     if not path.is_file():
         raise click.ClickException(f"批量查询文件不存在：{path}")
     return [
-        _normalize_batch_query(line)
+        _normalize_batch_query(line, engine)
         for line in path.read_text(encoding="utf-8-sig").splitlines()
         if line.strip() and not line.lstrip().startswith("#")
     ]
 
 
-def _combine_batch_queries(queries: list[str], group_size: int = 100, max_query_length: int = 4096) -> list[str]:
-    """Combine homogeneous IP/domain clues into bounded OR expressions."""
+def _combine_shodan_batch(queries: list[str], group_size: int, max_query_length: int) -> list[str]:
+    """Shodan ORs comma-separated values inside one filter, so clues group by filter name."""
+    pattern = re.compile(r"^(ip|domain):(\S+)$")
+    combined: list[str] = []
+    chunk: list[str] = []
+    active: str | None = None
+
+    def flush() -> None:
+        nonlocal chunk, active
+        if chunk:
+            combined.append(f"{active}:{','.join(chunk)}")
+        chunk, active = [], None
+
+    for query in dict.fromkeys(queries):
+        match = pattern.fullmatch(query)
+        if not match:
+            flush()
+            combined.append(query)
+            continue
+        field, value = match.group(1), match.group(2)
+        expanded = f"{field}:{','.join([*chunk, value])}"
+        if active is not None and (field != active or len(chunk) >= group_size or len(expanded) > max_query_length):
+            flush()
+        active = field
+        chunk.append(value)
+    flush()
+    return combined
+
+
+def _combine_batch_queries(
+    queries: list[str],
+    group_size: int = 100,
+    max_query_length: int = 4096,
+    engine: str = "fofa",
+) -> list[str]:
+    """Combine homogeneous IP/domain clues into bounded expressions for the selected engine."""
     if group_size <= 1:
         return list(dict.fromkeys(queries))
-    homogeneous: dict[str, list[str]] = {"ip": [], "domain": []}
+    selected = normalize_engine(engine)
+    if selected == "shodan":
+        return _combine_shodan_batch(queries, group_size, max_query_length)
+    if selected == "censys":
+        # Each IP is one paid entity lookup; OR-grouping would be invalid syntax.
+        return list(dict.fromkeys(queries))
+    pattern = _BATCH_GROUP_PATTERNS[selected]
+    groups: dict[str, list[str]] = {}
     custom: list[str] = []
-    pattern = re.compile(r'^(ip|domain)="([^"\\]+)"$')
     for query in dict.fromkeys(queries):
         match = pattern.fullmatch(query)
         if match:
-            homogeneous[match.group(1)].append(query)
+            groups.setdefault(match.group(1), []).append(query)
         else:
             custom.append(query)
 
     combined: list[str] = []
-    for field in ("ip", "domain"):
+    for field in groups:
         chunk: list[str] = []
-        for query in homogeneous[field]:
+        for query in groups[field]:
             candidate = f"({' || '.join([*chunk, query])})"
             if chunk and (len(chunk) >= group_size or len(candidate) > max_query_length):
                 combined.append(chunk[0] if len(chunk) == 1 else f"({' || '.join(chunk)})")
@@ -1001,8 +1355,8 @@ async def _approve_and_execute_scan(
         return "no_targets", None, None
     if machine:
         return "approval_required_interactive_cli", None, None
-    if os.getenv("FOFAMAP_ENABLE_SCANNING", "").lower() == "false":
-        console.print("[yellow]扫描计划已生成，但管理员通过 FOFAMAP_ENABLE_SCANNING=false 禁止了主动扫描。[/]")
+    if os.getenv("CYBERMAP_ENABLE_SCANNING", "").lower() == "false":
+        console.print("[yellow]扫描计划已生成，但管理员通过 CYBERMAP_ENABLE_SCANNING=false 禁止了主动扫描。[/]")
         return "disabled_by_administrator", None, None
     from core.scans import align_scan_severities
 
@@ -1045,10 +1399,10 @@ async def _approve_and_execute_scan(
     from service.store import JobStore
 
     try:
-        store = JobStore(os.getenv("FOFAMAP_DATABASE_URL", "sqlite:///./fofamap.sqlite3"))
+        store = JobStore(os.getenv("CYBERMAP_DATABASE_URL", "sqlite:///./cybermap.sqlite3"))
         approval = ScanApproval(
             store,
-            secret=os.getenv("FOFAMAP_SCAN_APPROVAL_SECRET") or secrets.token_urlsafe(32),
+            secret=os.getenv("CYBERMAP_SCAN_APPROVAL_SECRET") or secrets.token_urlsafe(32),
             allow_private=settings.system.allow_private_network,
         )
         request = ScanPlanRequest(
@@ -1111,6 +1465,81 @@ async def _export_agent_assets(run: Any, options: dict[str, Any]) -> Path | None
         extra = "（预览截断，完整计数见报告）" if getattr(run, "assets_truncated", False) else ""
         console.print(f"[bold green]✓ 资产结果已导出：[/][cyan]{artifact}[/]{extra}")
     return artifact
+
+
+def _make_router() -> Any:
+    from providers.registry import ProviderRegistry, ProviderRouter
+
+    registry = ProviderRegistry(settings, execution_mode="interactive")
+    return registry, ProviderRouter(registry)
+
+
+async def _run_agent_flow(build_agent: Any, options: dict[str, Any], machine: bool) -> int:
+    """Drive any agent (single engine or merged engines) through the shared CLI flow."""
+    registry, router = _make_router()
+    live: Live | None = None
+    live_started = False
+    latest_page: SearchPage | None = None
+    if not machine:
+        section("AI 智能侦察", "实时展示执行阶段、查询语句和资产结果")
+        live = Live("", console=console, refresh_per_second=8, transient=True)
+
+    def on_progress(agent_run: Any, _step: Any) -> None:
+        nonlocal live_started
+        if live is None:
+            return
+        live.update(build_agent_progress(agent_run, latest_page), refresh=True)
+        if not live_started:
+            live.start(refresh=True)
+            live_started = True
+
+    async def on_page(agent_run: Any, page: SearchPage, _page_number: int) -> None:
+        nonlocal latest_page
+        if options.get("check_alive") or options.get("include") or options.get("key_word") or options.get("max_age_days"):
+            values = [record.values for record in page.records]
+            values, fields, age_stats = await _apply_alive_and_local_filters(
+                values,
+                fields=list(agent_run.fields or page.fields),
+                options=options,
+            )
+            agent_run.fields = fields
+            page.fields = fields
+            page.records = [AssetRecord(values=item) for item in values]
+            for key, value in age_stats.items():
+                agent_run.age_filter[key] = agent_run.age_filter.get(key, 0) + value
+        latest_page = page
+        on_progress(agent_run, None)
+
+    need_page_observer = (not machine) or bool(
+        options.get("check_alive") or options.get("include") or options.get("key_word") or options.get("max_age_days")
+    )
+    try:
+        run = await build_agent(router).run(
+            options["ai_query"],
+            max_records=options.get("max_records") or settings.search.max_records,
+            max_pages=_search_window(options)[1],
+            fields=None if _use_smart_fields(options) else _fields(options.get("query_fields")),
+            smart_fields=_use_smart_fields(options),
+            min_evidence=options.get("min_evidence"),
+            ensure_timestamp=bool(options.get("max_age_days")),
+            on_progress=on_progress if not machine else None,
+            on_page=on_page if need_page_observer else None,
+        )
+    finally:
+        if live is not None and live_started:
+            live.stop()
+        await registry.aclose()
+    await _apply_agent_result_filters(run, options, machine=machine)
+    if not machine:
+        render_agent(run)
+    if run.error:
+        if machine:
+            _emit_json(run, options["output_format"])
+        return 2
+    await _agent_scan_and_report(run, options, machine)
+    if machine:
+        _emit_json(run, options["output_format"])
+    return 0
 
 
 async def _agent_scan_and_report(run: Any, options: dict[str, Any], machine: bool) -> tuple[str, str | None]:
@@ -1264,7 +1693,7 @@ async def _main_async(**options: Any) -> int:
                         f"  vip_level={item['vip_level']:<3} {item['name']:<8}  "
                         f"主机聚合 {host} · 统计聚合 {stats} · {item['requests_per_second']:g} req/s{extra}"
                     )
-            console.print("\n[dim]查询语法请运行 `fofamap syntax`；规则库请运行 `fofamap rules`。[/]")
+            console.print("\n[dim]查询语法请运行 `cybermap syntax`；规则库请运行 `cybermap rules`。[/]")
         return 0
     if action == "syntax":
         from core.syntax import syntax_catalog
@@ -1312,37 +1741,91 @@ async def _main_async(**options: Any) -> int:
         return 0
 
     queries: list[str] = []
+    engine_scope = (options.get("engine") or settings.search.engine or "fofa").strip().lower()
+    engine_name = _resolve_engine_scope(engine_scope)
+    # A merged run plans in each engine's own query syntax, so only the agent can drive it.
+    # Checking before the query sources are built keeps `-e all -bq/-ico` from failing with a
+    # confusing "unknown engine" error instead of the real reason.
+    if options.get("no_cache"):
+        from core.cache import disable_cache
+
+        disable_cache()
+        if not _machine_output(options):
+            console.print("[yellow]分页缓存已禁用：本次会重新请求引擎并消耗额度。[/]")
+    if options.get("cache_clear"):
+        from core.cache import resolve_cache
+
+        cache = resolve_cache()
+        if cache is not None:
+            dropped = cache.clear()
+            if not _machine_output(options):
+                console.print(f"[green]✓[/] 分页缓存已清空（{dropped:,} 条）；本次将重新请求引擎。")
+        elif not _machine_output(options):
+            console.print("[yellow]分页缓存已禁用（cache.enabled=false），无需清空。[/]")
+    if options.get("min_evidence") and not options.get("ai_query"):
+        raise click.UsageError("--min-evidence 只适用于 AI 智能侦察（-ai）。")
+    if engine_name == MULTI_ENGINE and not options.get("ai_query") and action != "account":
+        raise click.UsageError(
+            "「all」多引擎范围仅用于 AI 智能侦察（-ai）与账号查询（account）；"
+            "经典查询请用 -e fofa / -e shodan / -e hunter / -e daydaymap 指定单一引擎"
+            "（Censys 免费套餐仅支持 -e censys -hq <IP> 主机画像）。"
+        )
     if options.get("query"):
         queries.append(options["query"])
     if options.get("bat_query"):
-        batch_queries = _load_batch(options["bat_query"])
-        queries.extend(_combine_batch_queries(batch_queries, options.get("batch_group_size") or 100))
+        batch_queries = _load_batch(options["bat_query"], engine_name)
+        queries.extend(_combine_batch_queries(batch_queries, options.get("batch_group_size") or 100, engine=engine_name))
     if options.get("icon_query"):
         if not machine:
             section("图标哈希计算", options["icon_query"])
         try:
-            icon_query = await IconHashCalculator.get_hash(options["icon_query"])
+            digest = await IconHashCalculator.hash_url(options["icon_query"])
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
-        if not icon_query:
+        if digest is None:
             raise click.ClickException("无法获取网站图标或计算哈希。")
+        generated = favicon_query(engine_name, digest)
         if not machine:
-            console.print(f"[green]✓[/] 已生成 FOFA 语句：[bold cyan]{icon_query}[/]")
-        queries.append(icon_query)
+            console.print(f"[green]✓[/] 已生成 {engine_label(engine_name)} 语句：[bold cyan]{generated}[/]")
+        queries.append(generated)
     if options.get("icon_file"):
         try:
-            icon_query = IconHashCalculator.from_file(options["icon_file"])
+            digest = IconHashCalculator.hash_file(options["icon_file"])
         except ValueError as exc:
             raise click.ClickException(str(exc)) from exc
+        generated = favicon_query(engine_name, digest)
         if not machine:
             section("本地图标哈希计算", options["icon_file"])
-            console.print(f"[green]✓[/] 已生成 FOFA 语句：[bold cyan]{icon_query}[/]")
-        queries.append(icon_query)
+            console.print(f"[green]✓[/] 已生成 {engine_label(engine_name)} 语句：[bold cyan]{generated}[/]")
+        queries.append(generated)
 
-    async with FofaClient() as client:
+    if engine_name == MULTI_ENGINE:
+        if action == "account":
+            payload = {}
+            for engine in AGENT_ENGINES:
+                async with create_engine(engine) as scoped_client:
+                    payload[engine] = await scoped_client.account()
+            if machine:
+                _emit_json(payload, options["output_format"])
+            else:
+                for engine in AGENT_ENGINES:
+                    section(f"{engine_label(engine)} 账号", f"{engine_label(MULTI_ENGINE)} 范围")
+                    _render_account_panel(engine, payload[engine])
+            return 0
+        from core.agent import MultiEngineAgent
+
+        def build_multi(router: Any) -> Any:
+            return MultiEngineAgent(AGENT_ENGINES, router, engine_factory=create_engine)
+
+        return await _run_agent_flow(build_multi, options, machine)
+
+    async with create_engine(engine_name) as client:
         if action == "account":
             data = await client.account()
-            _emit_json(data, options["output_format"]) if machine else render_account(data)
+            if machine:
+                _emit_json(data, options["output_format"])
+            else:
+                _render_account_panel(engine_name, data)
             return 0
         await _account(client, machine)
         if options.get("host_query"):
@@ -1365,74 +1848,13 @@ async def _main_async(**options: Any) -> int:
             if machine:
                 _emit_json(data, options["output_format"])
             else:
-                section("FOFA 统计聚合")
+                section(f"{engine_label(engine_name)} 统计聚合")
                 render_stats(data, options["count_query"])
             return 0
         if options.get("ai_query"):
-            from core.agent import FofaAgent
-            from providers.registry import ProviderRegistry, ProviderRouter
+            from core.agent import AssetAgent
 
-            registry = ProviderRegistry(settings, execution_mode="interactive")
-            router = ProviderRouter(registry)
-            live: Live | None = None
-            live_started = False
-            latest_page: SearchPage | None = None
-            if not machine:
-                section("AI 智能侦察", "实时展示执行阶段、查询语句和资产结果")
-                live = Live("", console=console, refresh_per_second=8, transient=True)
-
-            def on_progress(agent_run, _step) -> None:
-                nonlocal live_started
-                if live is None:
-                    return
-                live.update(build_agent_progress(agent_run, latest_page), refresh=True)
-                if not live_started:
-                    live.start(refresh=True)
-                    live_started = True
-
-            async def on_page(agent_run, page, _page_number) -> None:
-                nonlocal latest_page
-                if options.get("check_alive") or options.get("include") or options.get("key_word"):
-                    values = [record.values for record in page.records]
-                    values, fields = await _apply_alive_and_local_filters(
-                        values,
-                        fields=list(agent_run.fields or page.fields),
-                        options=options,
-                    )
-                    agent_run.fields = fields
-                    page.fields = fields
-                    page.records = [AssetRecord(values=item) for item in values]
-                latest_page = page
-                on_progress(agent_run, None)
-
-            need_page_observer = (not machine) or bool(
-                options.get("check_alive") or options.get("include") or options.get("key_word")
-            )
-            try:
-                run = await FofaAgent(client, router).run(
-                    options["ai_query"],
-                    max_records=options.get("max_records") or settings.search.max_records,
-                    max_pages=_search_window(options)[1],
-                    fields=None if _use_smart_fields(options) else _fields(options.get("query_fields")),
-                    smart_fields=_use_smart_fields(options),
-                    on_progress=on_progress if not machine else None,
-                    on_page=on_page if need_page_observer else None,
-                )
-            finally:
-                if live is not None and live_started:
-                    live.stop()
-                await registry.aclose()
-            await _apply_agent_result_filters(run, options, machine=machine)
-            if not machine:
-                render_agent(run)
-            if run.error:
-                if machine:
-                    _emit_json(run, options["output_format"])
-                return 2
-            await _agent_scan_and_report(run, options, machine)
-            if machine:
-                _emit_json(run, options["output_format"])
-            return 0
+            return await _run_agent_flow(lambda router: AssetAgent(client, router), options, machine)
         if queries:
             await _run_searches(client, queries, options)
             return 0
@@ -1440,7 +1862,7 @@ async def _main_async(**options: Any) -> int:
 
 
 @click.command(context_settings={"help_option_names": ["-h", "--help"], "max_content_width": 120})
-@click.version_option("2.0.1", "-V", "--version", prog_name="FofaMap")
+@click.version_option("2.0.1", "-V", "--version", prog_name="CyberMap")
 @click.argument("cmd", required=False, type=click.Choice(["account", "fields", "syntax", "rules", "serve", "init", "integrate"]))
 @click.option(
     "--agent",
@@ -1475,7 +1897,7 @@ async def _main_async(**options: Any) -> int:
     help="用户级或项目级",
 )
 @click.option("--list", "list_integrations", is_flag=True, help="列出 MCP 与 Skill 支持情况")
-@click.option("--uninstall", "uninstall_integration", is_flag=True, help="仅移除 FofaMap 管理的配置与文件")
+@click.option("--uninstall", "uninstall_integration", is_flag=True, help="仅移除 CyberMap 管理的配置与文件")
 @click.option("--dry-run", is_flag=True, help="只显示将发生的集成变更")
 @click.option(
     "--server-command",
@@ -1483,7 +1905,7 @@ async def _main_async(**options: Any) -> int:
     help="覆盖宿主启动 MCP 的命令；默认自动写入当前 Python 与 mcp_server.py 的绝对路径",
 )
 @click.option("--project-root", type=click.Path(file_okay=False, path_type=Path), help="项目级安装时的项目根目录")
-@click.option("--force", "force_integration", is_flag=True, help="备份后替换同名、非 FofaMap 管理的 Skill/插件")
+@click.option("--force", "force_integration", is_flag=True, help="备份后替换同名、非 CyberMap 管理的 Skill/插件")
 @click.option("-init", "--init", "init_mode", is_flag=True, help="启动安全初始化向导（兼容旧用法）")
 @click.option("-ai", "--ai-query", prompt="请描述 AI 侦察需求", prompt_required=False, help="AI 智能侦察（兼容 2.0）")
 @click.option("-q", "--query", prompt="请输入 FOFA 查询语法", prompt_required=False, help="FOFA 标准查询（兼容 2.0）")
@@ -1494,6 +1916,28 @@ async def _main_async(**options: Any) -> int:
 @click.option("-ico", "--icon-query", prompt="请输入网站 URL", prompt_required=False, help="计算网站图标哈希并反查")
 @click.option("--icon-file", help="计算本地图标文件哈希并反查（最大 4 MiB）")
 @click.option("-bq", "--bat-query", prompt="请输入批量查询文件", prompt_required=False, help="每行一条查询语句的 TXT 文件")
+@click.option(
+    "-e",
+    "--engine",
+    type=click.Choice(["fofa", "shodan", "hunter", "daydaymap", "censys", "all"]),
+    default=None,
+    help=(
+        "资产搜索引擎：fofa、shodan、hunter、daydaymap、censys（仅主机画像），"
+        "或 all（AI 多引擎各自规划后合并）；默认跟随配置 search.engine"
+    ),
+)
+@click.option(
+    "--max-age-days",
+    type=click.IntRange(1, 3650),
+    default=None,
+    help="只保留各引擎最近 N 天内确认过的资产（用引擎自带时间戳过滤；无时间戳的记录保留并提示）",
+)
+@click.option(
+    "--min-evidence",
+    type=click.Choice(["recall", "hypothesis", "balanced", "precision"]),
+    default=None,
+    help="仅保留证据等级不低于该值的资产（仅 -ai）：recall < hypothesis < balanced < precision",
+)
 @click.option("-f", "--query-fields", help="逗号分隔的返回字段；与 --smart-fields 同时出现时以智能选择为准")
 @click.option(
     "--smart-fields/--no-smart-fields",
@@ -1523,6 +1967,8 @@ async def _main_async(**options: Any) -> int:
 @click.option("--outdir", help="默认导出目录")
 @click.option("--export-format", type=click.Choice(["xlsx", "csv", "jsonl"]), help="导出文件格式")
 @click.option("--save/--no-save", default=True, help="自动保存完整结果（默认开启）")
+@click.option("--no-cache", is_flag=True, help="禁用分页缓存：每次都重新请求引擎（会消耗额度）")
+@click.option("--cache-clear", is_flag=True, help="先清空分页缓存再执行")
 @click.option("--display-rows", type=click.IntRange(1, 500), default=100, help="每页终端展示行数（默认完整展示 100 条）")
 @click.option("--output-format", type=click.Choice(["table", "json", "jsonl"]), default="table", help="终端输出格式")
 @click.option("--json", "json_output", is_flag=True, help="等价于 --output-format json")
@@ -1540,7 +1986,7 @@ async def _main_async(**options: Any) -> int:
 @click.option("-batch", "--batch", is_flag=True, help="兼容 2.0 无人值守标记（不会跳过扫描审批）")
 @click.option("-up", "--update", is_flag=True, help="更新 Nuclei 与模板")
 def main(**options: Any) -> None:
-    """FOFA 资产检索、导出、MCP 与多模型智能体。无参数启动交互式向导。"""
+    """FOFA / Shodan 资产检索、导出、MCP 与多模型智能体。无参数启动交互式向导。"""
     if options.pop("json_output"):
         options["output_format"] = "json"
     if options.pop("init_mode"):
@@ -1575,10 +2021,11 @@ def main(**options: Any) -> None:
         else:
             code = asyncio.run(_main_async(**options))
     except FofaError as exc:
+        engine_for_error = str(options.get("engine") or settings.search.engine or "fofa").strip().lower()
         if machine:
             _emit_json({"error": exc.as_dict()}, options["output_format"])
         else:
-            render_error(exc.code.value, exc.message, exc.alternatives)
+            render_error(exc.code.value, exc.message, exc.alternatives, engine=engine_for_error)
         raise SystemExit(2) from exc
     except KeyboardInterrupt:
         if not machine:

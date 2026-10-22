@@ -3,9 +3,9 @@ requires = ["hatchling>=1.27"]
 build-backend = "hatchling.build"
 
 [project]
-name = "fofamap"
+name = "cybermap"
 version = "2.0.1"
-description = "FOFA API, MCP 2.0 and vendor-neutral workflow agent"
+description = "CyberMap: multi-engine asset mapping CLI, MCP server and workflow agent (fork of FofaMap)"
 readme = "README.md"
 requires-python = ">=3.10"
 license = {file = "LICENSE"}
@@ -34,15 +34,15 @@ postgres = ["psycopg[binary]>=3.2,<4"]
 test = ["pytest>=9.0.3,<10", "pytest-asyncio>=1.1,<2", "ruff>=0.12,<1"]
 
 [project.scripts]
-fofamap = "fofamap:main"
-fofamap-api = "service.api:main"
-fofamap-mcp = "mcp_server:run_server"
+cybermap = "cybermap:main"
+cybermap-api = "service.api:main"
+cybermap-mcp = "mcp_server:run_server"
 
 [tool.hatch.build.targets.wheel]
 packages = ["config", "core", "providers", "service", "utils"]
 
 [tool.hatch.build.targets.wheel.force-include]
-"fofamap.py" = "fofamap.py"
+"cybermap.py" = "cybermap.py"
 "mcp_server.py" = "mcp_server.py"
 "agent-kit" = "agent-kit"
 

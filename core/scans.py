@@ -50,7 +50,7 @@ TEMPLATE_ID_SEVERITIES = {
 
 
 def nuclei_id_allowlist() -> set[str]:
-    extra = {item.strip() for item in os.getenv("FOFAMAP_NUCLEI_ID_ALLOWLIST", "").split(",") if item.strip()}
+    extra = {item.strip() for item in os.getenv("CYBERMAP_NUCLEI_ID_ALLOWLIST", "").split(",") if item.strip()}
     return DEFAULT_NUCLEI_ID_ALLOWLIST | extra
 
 
@@ -136,10 +136,10 @@ class ScanPlanRequest(BaseModel):
 class ScanApproval:
     def __init__(self, store: JobStore, secret: str | None = None, *, allow_private: bool = False) -> None:
         self.store = store
-        self.secret = (secret or os.getenv("FOFAMAP_SCAN_APPROVAL_SECRET", "")).encode()
+        self.secret = (secret or os.getenv("CYBERMAP_SCAN_APPROVAL_SECRET", "")).encode()
         self.allow_private = allow_private
         if len(self.secret) < 24:
-            raise ValueError("FOFAMAP_SCAN_APPROVAL_SECRET must contain at least 24 characters")
+            raise ValueError("CYBERMAP_SCAN_APPROVAL_SECRET must contain at least 24 characters")
 
     @staticmethod
     def _b64(data: bytes) -> str:
@@ -161,12 +161,12 @@ class ScanApproval:
             raise ValueError(f"private, loopback, link-local, reserved and metadata targets are blocked: {target}")
 
     def create(self, request: ScanPlanRequest) -> tuple[dict[str, Any], str]:
-        template_allowlist = {item for item in os.getenv("FOFAMAP_NUCLEI_TEMPLATE_ALLOWLIST", "").split(",") if item}
+        template_allowlist = {item for item in os.getenv("CYBERMAP_NUCLEI_TEMPLATE_ALLOWLIST", "").split(",") if item}
         id_allowlist = nuclei_id_allowlist()
         if not request.all_templates and any(item not in template_allowlist for item in request.templates):
-            raise ValueError("one or more Nuclei templates are not in FOFAMAP_NUCLEI_TEMPLATE_ALLOWLIST")
+            raise ValueError("one or more Nuclei templates are not in CYBERMAP_NUCLEI_TEMPLATE_ALLOWLIST")
         if not request.all_templates and any(item not in id_allowlist for item in request.template_ids):
-            raise ValueError("one or more Nuclei template IDs are not in FOFAMAP_NUCLEI_ID_ALLOWLIST")
+            raise ValueError("one or more Nuclei template IDs are not in CYBERMAP_NUCLEI_ID_ALLOWLIST")
         for target in request.targets:
             self._assert_target(target)
         expires = dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=request.ttl_seconds)

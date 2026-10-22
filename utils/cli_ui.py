@@ -1,4 +1,4 @@
-"""Human-first Rich terminal presentation for FofaMap's classic and wizard modes."""
+"""Human-first Rich terminal presentation for CyberMap's classic and wizard modes."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ from rich.table import Table
 from rich.text import Text
 
 from config import config_write_path
+from core.engines import engine_label
 from core.models import AssetRecord, SearchPage
 from utils.helpers import insert_alive_status_field
 
@@ -107,13 +108,16 @@ def _summary_panel(markdown: str) -> Panel:
 
 def print_banner() -> None:
     logo = Text()
-    logo.append("  ______      ____        __  ___            \n", style="bold cyan")
-    logo.append(" / ____/___  / __/___ _  /  |/  /___ _____  \n", style="bold cyan")
-    logo.append("/ /_  / __ \\/ /_/ __ `/ / /|_/ / __ `/ __ \\ \n", style="bold cyan")
-    logo.append("/ __/ / /_/ / __/ /_/ / / /  / / /_/ / /_/ /\n", style="bold cyan")
-    logo.append("/_/    \\____/_/  \\__,_/ /_/  /_/\\__,_/ .___/ \n", style="bold cyan")
-    logo.append("                                      /_/", style="bold cyan")
-    subtitle = Text("  v2.0.1  [ AI Powered & Interactive Wizard ] — By Hx0 Team", style="bold bright_white")
+    logo.append("  ____      _               __  __             \n", style="bold cyan")
+    logo.append(" / ___|   _| |__   ___ _ __|  \\/  | __ _ _ __  \n", style="bold cyan")
+    logo.append("| |  | | | | '_ \\ / _ \\ '__| |\\/| |/ _` | '_ \\ \n", style="bold cyan")
+    logo.append("| |__| |_| | |_) |  __/ |  | |  | | (_| | |_) |\n", style="bold cyan")
+    logo.append(" \\____\\__, |_.__/ \\___|_|  |_|  |_|\\__,_| .__/ \n", style="bold cyan")
+    logo.append("      |___/                             |_|    ", style="bold cyan")
+    subtitle = Text(
+        "  v2.0.1  [ AI Powered & Interactive Wizard ]  ·  Forked from FofaMap",
+        style="bold bright_white",
+    )
     console.print(Panel(Group(logo, subtitle), border_style="cyan", padding=(0, 1), expand=False))
 
 
@@ -158,14 +162,113 @@ def render_account(data: dict[str, Any]) -> None:
     console.print(Panel(grid, title="[bold green]✓ FOFA 登录成功[/]", border_style="green", expand=False))
 
 
-def render_query_overview(query: str, fields: list[str], pages: int, size: int, full: bool) -> None:
+def render_shodan_account(data: dict[str, Any]) -> None:
+    """Render `/api-info`: plan plus the monthly limits that query credits are billed against."""
+
+    def credit(value: Any) -> str:
+        if value is None:
+            return "-"
+        if isinstance(value, int) and value < 0:
+            return "不限"
+        return f"{value:,}" if isinstance(value, int) else str(value)
+
+    limits = data.get("usage_limits") or {}
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column(style="white")
+    grid.add_row("套餐", str(data.get("plan") or "-"))
+    grid.add_row("查询额度", f"{credit(data.get('query_credits'))}（上限 {credit(limits.get('query_credits'))}）")
+    grid.add_row("扫描额度", f"{credit(data.get('scan_credits'))}（上限 {credit(limits.get('scan_credits'))}）")
+    grid.add_row("监控 IP", f"{credit(data.get('monitored_ips'))}（上限 {credit(limits.get('monitored_ips'))}）")
+    if data.get("unlocked_left") is not None:
+        grid.add_row("解锁额度", credit(data.get("unlocked_left")))
+    console.print(Panel(grid, title="[bold green]✓ Shodan 登录成功[/]", border_style="green", expand=False))
+    console.print(
+        "[dim]计费：第一页且不含过滤器的查询不消耗额度；含 `过滤:值` 的查询与第一页之后的翻页各消耗 1 查询额度。"
+        "统计聚合走 /shodan/host/count，不消耗额度。[/]"
+    )
+
+
+def render_daydaymap_account(data: dict[str, Any]) -> None:
+    """DayDayMap has no API balance endpoint, so show the local capability view instead."""
+    configured = bool(data.get("api_key_configured"))
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column(style="white")
+    grid.add_row("认证方式", "api-key（个人中心获取，不过期）")
+    grid.add_row("凭据状态", "[green]已配置[/]" if configured else "[yellow]未配置[/]")
+    grid.add_row("积分余额", "未知（开放 API 无余额接口，需登录个人中心查看）")
+    grid.add_row("单页上限", f"{data.get('page_size_limit') or 10000:,} 条/页")
+    grid.add_row("检索接口", str(data.get("search_endpoint") or "-"))
+    console.print(Panel(grid, title="[bold]DayDayMap 账号[/]", border_style="cyan"))
+
+
+def render_censys_account(data: dict[str, Any]) -> None:
+    """Render the Censys Free credit balance (`/v3/accounts/users/credits`)."""
+
+    def credits(value: Any) -> str:
+        return f"{value:,}" if isinstance(value, int) else "-"
+
+    monthly = data.get("monthly_credits")
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column(style="white")
+    grid.add_row("套餐", str(data.get("plan") or "free").upper())
+    grid.add_row("可用额度", f"{credits(data.get('balance'))} / {credits(monthly) if monthly else '-'}（每月）")
+    grid.add_row("重置时间", str(data.get("resets_at") or "-"))
+    grid.add_row("可用接口", "主机画像 1 额度/次；Free 套餐不开放 search / aggregate")
+    console.print(Panel(grid, title="[bold]Censys 账号[/]", border_style="cyan"))
+
+
+def render_hunter_account(data: dict[str, Any]) -> None:
+    """Render `/openApi/userInfo`: account type plus the free/equity point pools Hunter bills from."""
+
+    def points(value: Any) -> str:
+        if value is None:
+            return "-"
+        if isinstance(value, int) and value < 0:
+            return "不限"
+        return f"{value:,}" if isinstance(value, int) else str(value)
+
+    free = data.get("rest_free_point")
+    equity = data.get("rest_equity_point")
+    total = (free if isinstance(free, int) else 0) + (equity if isinstance(equity, int) else 0)
+    personal = data.get("personal_info") or {}
+    grid = Table.grid(padding=(0, 2))
+    grid.add_column(style="bold cyan")
+    grid.add_column(style="white")
+    grid.add_row("账号类型", str(data.get("type") or "-"))
+    grid.add_row("可用积分", f"{points(total)}（免费 {points(free)} · 权益 {points(equity)}）")
+    grid.add_row("免费积分/日", points(data.get("day_free_point")))
+    grid.add_row("导出额度", f"{points(data.get('rest_export_quota'))}（单次上限 {points(data.get('once_export_quota'))}）")
+    grid.add_row("付费账号", "是" if personal.get("is_charge") else "否")
+    console.print(Panel(grid, title="[bold green]✓ Hunter 登录成功[/]", border_style="green", expand=False))
+    console.print(
+        "[dim]计费：按返回条数扣减积分（重复的同一条查询不扣分）；被拒绝的请求不扣分。"
+        "单个查询最多翻页到 10000 条，且开放 API 不提供聚合统计接口。[/]"
+    )
+
+
+def render_query_overview(
+    query: str,
+    fields: list[str],
+    pages: int,
+    size: int,
+    full: bool,
+    *,
+    full_label: str = "历史数据",
+    max_age_days: int | None = None,
+    budget_label: str | None = None,
+) -> None:
     grid = Table.grid(padding=(0, 2))
     grid.add_column(style="bold cyan", no_wrap=True)
     grid.add_column(style="white")
     grid.add_row("查询语句", query)
     grid.add_row("返回字段", ", ".join(fields))
-    grid.add_row("查询预算", f"最多 {pages} 页 × {size} 条")
-    grid.add_row("历史数据", "是" if full else "否")
+    grid.add_row("查询预算", budget_label or f"最多 {pages} 页 × {size} 条")
+    grid.add_row(full_label, "是" if full else "否")
+    if max_age_days:
+        grid.add_row("新鲜度过滤", f"仅保留最近 {max_age_days} 天内有更新的记录")
     console.print(Panel(grid, title="[bold]检索任务[/]", border_style="blue"))
 
 
@@ -246,11 +349,11 @@ def build_asset_table(page: SearchPage, display_rows: int = 100, terminal_width:
     return table
 
 
-def render_search_page(page: SearchPage, page_number: int, display_rows: int = 100) -> None:
+def render_search_page(page: SearchPage, page_number: int, display_rows: int = 100, *, engine: str = "fofa") -> None:
     count = len(page.records)
     title = f"第 {page_number} 页 · {count} 条"
     if page.total is not None:
-        title += f" · FOFA 总量 {page.total:,}"
+        title += f" · {engine_label(engine)} 总量 {page.total:,}"
     console.print(Panel(build_asset_table(page, display_rows), title=f"[bold green]{title}[/]", border_style="green"))
     hidden = [field for field in page.fields if field not in _visible_fields(page.fields, console.width)]
     if hidden:
@@ -277,8 +380,13 @@ def render_host(data: dict[str, Any]) -> None:
         ("组织", "org"),
         ("ASN", "asn"),
         ("更新时间", "update_time"),
+        *((("主机名", "hostnames"),) if data.get("hostnames") else ()),
     ):
-        grid.add_row(label, _cell(data.get(key, "-")))
+        value = data.get(key, "-")
+        if isinstance(value, list):
+            text = ", ".join(str(item) for item in value)
+            value = f"{text[:160]}…" if len(text) > 160 else text
+        grid.add_row(label, _cell(value))
     items: list[Any] = [Panel(grid, title="[bold]主机资产画像[/]", border_style="cyan")]
     ports = data.get("ports") or []
     if ports:
@@ -348,14 +456,15 @@ def _agent_asset_page(run: AgentRun, *, tail: int | None = None) -> SearchPage:
 
 
 def _agent_query_table(run: AgentRun, *, compact: bool = False) -> Table:
+    label = engine_label(run.engine)
     table = Table(box=box.SIMPLE_HEAVY, header_style="bold cyan", expand=True)
     table.add_column("#", justify="right", style="dim", no_wrap=True)
     table.add_column("来源", no_wrap=True)
     table.add_column("策略", no_wrap=True)
     table.add_column("查询目的", max_width=30)
-    table.add_column("FOFA 语句", ratio=3)
+    table.add_column(f"{label} 语句", ratio=3)
     if not compact:
-        table.add_column("FOFA总量", justify="right", no_wrap=True)
+        table.add_column(f"{label}总量", justify="right", no_wrap=True)
         table.add_column("取样", justify="right", no_wrap=True)
         table.add_column("新增", justify="right", no_wrap=True)
     for index, item in enumerate(run.queries, start=1):
@@ -384,7 +493,7 @@ def _website_candidate_table(run: AgentRun) -> Table:
     table.add_column("域名", no_wrap=True)
     table.add_column("首选 URL", ratio=2)
     table.add_column("证据", ratio=2)
-    status_labels = {"corroborated": "交叉印证", "observed": "FOFA 已观测", "candidate": "待验证"}
+    status_labels = {"corroborated": "交叉印证", "observed": f"{engine_label(run.engine)} 已观测", "candidate": "待验证"}
     evidence_labels = {
         "entity_resolution": "实体解析",
         "name_in_title": "标题同名",
@@ -394,6 +503,10 @@ def _website_candidate_table(run: AgentRun) -> Table:
         "fofa_balanced": "均衡查询",
         "fofa_hypothesis": "域名假设",
         "fofa_recall": "召回查询",
+        "shodan_precision": "精准查询",
+        "shodan_balanced": "均衡查询",
+        "shodan_hypothesis": "域名假设",
+        "shodan_recall": "召回查询",
     }
     for item in run.website_candidates:
         table.add_row(
@@ -422,7 +535,12 @@ def build_agent_progress(run: AgentRun, latest_page: SearchPage | None = None) -
             )
         )
     elif run.query:
-        items.append(Panel(f"[bold]FOFA 语句[/]  {run.query}\n[bold]当前已接收[/]  {run.result_count:,} 条", border_style="blue"))
+        items.append(
+            Panel(
+                f"[bold]{engine_label(run.engine)} 语句[/]  {run.query}\n[bold]当前已接收[/]  {run.result_count:,} 条",
+                border_style="blue",
+            )
+        )
     if latest_page and latest_page.records:
         page = latest_page.model_copy(update={"records": latest_page.records[-8:]})
         items.append(
@@ -467,12 +585,17 @@ def render_agent(run: AgentRun) -> None:
         console.print(
             Panel(
                 _agent_query_table(run),
-                title=f"[bold cyan]FOFA 多维查询策略 · {len(run.queries)} 个 · 去重结果 {run.result_count:,} 条[/]",
+                title=f"[bold cyan]{engine_label(run.engine)} 多维查询策略 · {len(run.queries)} 个 · 去重结果 {run.result_count:,} 条[/]",
                 border_style="cyan",
             )
         )
     elif run.query:
-        console.print(Panel(f"[bold]FOFA 语句[/]\n{run.query}\n\n[bold]结果数[/]  {run.result_count:,}", border_style="cyan"))
+        console.print(
+            Panel(
+                f"[bold]{engine_label(run.engine)} 语句[/]\n{run.query}\n\n[bold]结果数[/]  {run.result_count:,}",
+                border_style="cyan",
+            )
+        )
     if run.website_candidates:
         console.print(
             Panel(
@@ -495,7 +618,7 @@ def render_agent(run: AgentRun) -> None:
         if run.evidence_counts.get("hypothesis"):
             console.print(
                 f"[yellow]其中 {run.evidence_counts['hypothesis']:,} 条来自官网域名假设验证，"
-                "仅说明候选域名在 FOFA 中存在；归属仍需结合官网内容、备案或权威来源复核。[/]"
+                f"仅说明候选域名在 {engine_label(run.engine)} 中存在；归属仍需结合官网内容、备案或权威来源复核。[/]"
             )
         if run.assets_truncated:
             console.print(f"[dim]终端结果为前 {shown:,} 条预览；本次查询实际返回 {run.result_count:,} 条。[/]")
@@ -506,6 +629,7 @@ def render_agent(run: AgentRun) -> None:
             run.error.get("code", "agent_error"),
             run.error.get("message", "智能体执行失败"),
             hint=run.error.get("hint"),
+            engine=run.engine,
         )
         return
     decision = Table.grid(padding=(0, 2))
@@ -646,20 +770,28 @@ def render_error(
     alternatives: list[str] | None = None,
     *,
     hint: str | None = None,
+    engine: str = "fofa",
 ) -> None:
     config_path = config_write_path()
+    label = engine_label(engine)
+    key_names = {
+        "fofa": "FOFA_API_KEY",
+        "shodan": "SHODAN_API_KEY",
+        "hunter": "HUNTER_API_KEY",
+    }.get(engine, "FOFA_API_KEY / SHODAN_API_KEY / HUNTER_API_KEY")
     hints = {
-        "auth_failed": "请检查 FOFA_API_KEY；若该密钥曾提交到 Git，请先轮换。",
-        "quota_exhausted": "FOFA 查询额度不足，请检查账号用量或降低查询预算。",
-        "permission_denied": "当前账号无权使用请求字段。FofaMap 不会静默降级，请确认替代字段后重试。",
-        "rate_limited": "触发 FOFA 限速；客户端已完成安全重试，请稍后再试或降低速率。",
-        "invalid_query": "请检查 FOFA 查询语法、引号与括号。",
-        "transport_error": "网络或 FOFA 服务暂时不可用，请检查连接后重试。",
+        "auth_failed": f"请检查 {key_names}；若该密钥曾提交到 Git，请先轮换。",
+        "quota_exhausted": f"{label} 查询额度不足，请检查账号用量或降低查询预算。",
+        "permission_denied": f"当前 {label} 账号无权使用该接口或请求字段。CyberMap 不会静默降级，请确认替代字段后重试。",
+        "rate_limited": f"触发 {label} 限速；客户端已完成安全重试，请稍后再试或降低速率。",
+        "invalid_query": f"请检查 {label} 查询语法、引号与括号。",
+        "transport_error": f"网络或 {label} 服务暂时不可用，请检查连接后重试。",
+        "unsupported": f"{label} 不具备该能力；请改用支持它的引擎（统计聚合见 FOFA / Shodan，主机画像见 FOFA / Shodan / Hunter）。",
         "model_provider_not_configured": (
-            f"运行 `fofamap init`（也兼容 `python fofamap.py -init`）配置 AI 提供商。配置文件位置：{config_path}"
+            f"运行 `cybermap init`（也兼容 `python cybermap.py -init`）配置 AI 提供商。配置文件位置：{config_path}"
         ),
         "model_auth_failed": (
-            f"AI API 密钥无效、过期或未配置。运行 `fofamap init` 重新填写，或检查环境变量/系统钥匙串。配置文件：{config_path}"
+            f"AI API 密钥无效、过期或未配置。运行 `cybermap init` 重新填写，或检查环境变量/系统钥匙串。配置文件：{config_path}"
         ),
         "model_not_found": "检查模型 ID、接口地址和协议；Ollama/LM Studio 还需确认服务已启动且模型已安装。",
         "model_transport_error": "检查网络、代理和接口地址；使用 Ollama/LM Studio 时确认本地服务端口可访问。",

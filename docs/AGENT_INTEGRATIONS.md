@@ -1,32 +1,32 @@
 # 智能体 MCP 与 Skills 集成
 
-FofaMap 2.0.1 提供一个可回滚的跨宿主安装器、一个通用 Agent Skill，以及兼容 Codex、Claude、Cursor、OpenClaw 和 Grok Build 的插件包。安装器默认把当前 Python 与 `mcp_server.py` 的绝对路径写入 stdio 配置，避免 Cursor 等 GUI 应用因没有继承终端 `PATH` 而出现 `spawn fofamap-mcp ENOENT`；配置中不写入 FOFA 或模型密钥。
+CyberMap 2.0.1 提供一个可回滚的跨宿主安装器、一个通用 Agent Skill，以及兼容 Codex、Claude、Cursor、OpenClaw 和 Grok Build 的插件包。安装器默认把当前 Python 与 `mcp_server.py` 的绝对路径写入 stdio 配置，避免 Cursor 等 GUI 应用因没有继承终端 `PATH` 而出现 `spawn cybermap-mcp ENOENT`；配置中不写入 FOFA 或模型密钥。
 
 ## 快速使用
 
 ```bash
 python -m pip install .
-fofamap integrate --list
-fofamap integrate --agent all --dry-run
-fofamap integrate --agent cursor
+cybermap integrate --list
+cybermap integrate --agent all --dry-run
+cybermap integrate --agent cursor
 ```
 
-默认无需手工查找 `fofamap-mcp`。如果宿主必须使用另一套已安装环境，可显式覆盖命令：
+默认无需手工查找 `cybermap-mcp`。如果宿主必须使用另一套已安装环境，可显式覆盖命令：
 
 ```bash
-fofamap integrate --agent codex --server-command /absolute/path/to/fofamap-mcp
+cybermap integrate --agent codex --server-command /absolute/path/to/cybermap-mcp
 ```
 
 项目级安装写入当前目录；也可以显式指定根目录：
 
 ```bash
-fofamap integrate --agent claude --scope project --project-root /path/to/project
+cybermap integrate --agent claude --scope project --project-root /path/to/project
 ```
 
-卸载只移除名为 `fofamap` 的 MCP 项和带 `.fofamap-managed.json` 的 Skill/插件：
+卸载只移除名为 `cybermap` 的 MCP 项和带 `.cybermap-managed.json` 的 Skill/插件：
 
 ```bash
-fofamap integrate --agent claude --uninstall
+cybermap integrate --agent claude --uninstall
 ```
 
 ## 支持矩阵
@@ -49,15 +49,15 @@ fofamap integrate --agent claude --uninstall
 
 | 宿主 | user scope | project scope |
 |---|---|---|
-| Cursor | `~/.cursor/mcp.json`, `~/.cursor/skills/fofamap` | `.cursor/mcp.json`, `.cursor/skills/fofamap` |
-| Codex | `~/.codex/config.toml`, `~/.agents/skills/fofamap` | `.codex/config.toml`, `.agents/skills/fofamap` |
-| Claude Code | `~/.claude.json`, `~/.claude/skills/fofamap` | `.mcp.json`, `.claude/skills/fofamap` |
-| OpenCode | `~/.config/opencode/opencode.json`, `~/.config/opencode/skills/fofamap` | `opencode.json`, `.opencode/skills/fofamap` |
-| DeepSeek Harness | `~/.dsh/cordis.patch.yml`, `~/.dsh/skills/fofamap` | `.dsh/fofamap.cordis.yml`, `.dsh/skills/fofamap` |
-| LM Studio | `~/.lmstudio/mcp.json`, `~/.lmstudio/skills/fofamap` | LM Studio 配置仍为用户级 |
-| OpenClaw | `~/.openclaw/extensions/fofamap` | `.openclaw/extensions/fofamap` |
-| Hermes Agent | `~/.hermes/config.yaml`, `~/.hermes/skills/fofamap` | MCP 配置仍为用户级，Skill 使用 `.agents/skills/fofamap` |
-| Grok Build | `~/.grok/plugins/fofamap` | `.grok/plugins/fofamap` |
+| Cursor | `~/.cursor/mcp.json`, `~/.cursor/skills/cybermap` | `.cursor/mcp.json`, `.cursor/skills/cybermap` |
+| Codex | `~/.codex/config.toml`, `~/.agents/skills/cybermap` | `.codex/config.toml`, `.agents/skills/cybermap` |
+| Claude Code | `~/.claude.json`, `~/.claude/skills/cybermap` | `.mcp.json`, `.claude/skills/cybermap` |
+| OpenCode | `~/.config/opencode/opencode.json`, `~/.config/opencode/skills/cybermap` | `opencode.json`, `.opencode/skills/cybermap` |
+| DeepSeek Harness | `~/.dsh/cordis.patch.yml`, `~/.dsh/skills/cybermap` | `.dsh/cybermap.cordis.yml`, `.dsh/skills/cybermap` |
+| LM Studio | `~/.lmstudio/mcp.json`, `~/.lmstudio/skills/cybermap` | LM Studio 配置仍为用户级 |
+| OpenClaw | `~/.openclaw/extensions/cybermap` | `.openclaw/extensions/cybermap` |
+| Hermes Agent | `~/.hermes/config.yaml`, `~/.hermes/skills/cybermap` | MCP 配置仍为用户级，Skill 使用 `.agents/skills/cybermap` |
+| Grok Build | `~/.grok/plugins/cybermap` | `.grok/plugins/cybermap` |
 
 DeepSeek Harness 的 project scope 生成独立 overlay，启动时传入输出中给出的 `--patch` 路径。LM Studio 和 Hermes 的 MCP 配置本身是用户级，因此 project scope 只改变其 Skill 的发现范围（LM Studio 没有官方 Skill 发现机制）。
 
@@ -65,8 +65,8 @@ OpenClaw CLI 可用时，user scope 会调用 `openclaw plugins install/uninstal
 
 ## 分发资产
 
-- 通用 Skill：`agent-kit/skills/fofamap/`
-- 跨宿主插件：`agent-kit/plugins/fofamap/`
+- 通用 Skill：`agent-kit/skills/cybermap/`
+- 跨宿主插件：`agent-kit/plugins/cybermap/`
 - Codex manifest：`.codex-plugin/plugin.json`
 - Claude manifest：`.claude-plugin/plugin.json`
 - Cursor manifest：`.cursor-plugin/plugin.json`
@@ -78,24 +78,24 @@ Grok Build 会直接读取插件内的 Claude 格式；无需维护第二套 MCP
 
 - 安装器只写 MCP command/args，不读取或复制 `FOFA_API_KEY`、模型密钥或 bearer token。
 - 默认 command/args 固定为执行安装器的 Python 环境和同一安装包中的 MCP 入口；虚拟环境路径不会被解析成缺少依赖的基础 Python。
-- 写入配置前会确认当前环境包含 FofaMap 2.0.1 所需的 MCP 2.x SDK；依赖不完整时明确停止，避免产生路径正确但进程无法启动的假成功配置。
-- 已存在的配置文件首次修改前备份为 `<name>.fofamap.bak`，之后不会覆盖该备份。
+- 写入配置前会确认当前环境包含 CyberMap 2.0.1 所需的 MCP 2.x SDK；依赖不完整时明确停止，避免产生路径正确但进程无法启动的假成功配置。
+- 已存在的配置文件首次修改前备份为 `<name>.cybermap.bak`，之后不会覆盖该备份。
 - JSON/YAML 无法安全解析时立即停止，不猜测或重写损坏配置。
-- 同名 Skill/插件如果没有 FofaMap 管理标记，默认拒绝覆盖；`--force` 会先移动到 `.fofamap.bak`。
-- active Nuclei 扫描仍受 FofaMap MCP 的计划、精确范围和一次性审批机制约束。安装 Skill 不会开启扫描。
+- 同名 Skill/插件如果没有 CyberMap 管理标记，默认拒绝覆盖；`--force` 会先移动到 `.cybermap.bak`。
+- active Nuclei 扫描仍受 CyberMap MCP 的计划、精确范围和一次性审批机制约束。安装 Skill 不会开启扫描。
 
 ## 验证
 
 ```bash
-fofamap integrate --agent all --dry-run --output-format json
-fofamap integrate --agent codex
+cybermap integrate --agent all --dry-run --output-format json
+cybermap integrate --agent codex
 codex mcp list
-fofamap integrate --agent codex --uninstall
+cybermap integrate --agent codex --uninstall
 ```
 
 不同宿主通常需要重启会话或刷新 MCP/插件列表。LM Studio 也可以打开安装器输出的 deeplink；Hermes 可在会话中运行 `/reload-mcp`。
 
-如果早期 2.0.1 配置中仍是 `"command": "fofamap-mcp"`，直接重跑相同的 `integrate` 命令即可升级；安装器会保留其他 MCP 服务和用户配置。
+如果早期 2.0.1 配置中仍是 `"command": "cybermap-mcp"`，直接重跑相同的 `integrate` 命令即可升级；安装器会保留其他 MCP 服务和用户配置。
 
 ## 上游能力依据
 

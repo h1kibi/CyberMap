@@ -1,0 +1,18 @@
+{
+  "id": "cybermap",
+  "name": "CyberMap",
+  "version": "2.0.1",
+  "description": "Safe multi-engine asset research through CyberMap MCP and Agent Skills.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  },
+  "mcpServers": {
+    "cybermap": {
+      "command": "cybermap-mcp",
+      "args": []
+    }
+  },
+  "skills": ["./skills/cybermap"]
+}

@@ -387,7 +387,7 @@ def resolve_rule_query(keyword: str) -> FofaRule:
     chosen = exact[0] if len(exact) == 1 else (matches[0] if len(matches) == 1 else None)
     if chosen is None:
         names = "、".join(rule.name for rule in matches[:8]) or "无匹配"
-        raise ValueError(f"规则库无法唯一匹配 {keyword!r}。候选：{names}。请用 `fofamap rules -k {keyword}` 查看。")
+        raise ValueError(f"规则库无法唯一匹配 {keyword!r}。候选：{names}。请用 `cybermap rules -k {keyword}` 查看。")
     return chosen
 
 

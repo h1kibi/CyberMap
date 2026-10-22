@@ -319,7 +319,7 @@ async def test_incorrect_model_api_key_has_actionable_error():
             await provider.generate(system="s", prompt="p")
     assert captured.value.code == "model_auth_failed"
     assert captured.value.status_code == 401
-    assert "fofamap init" in captured.value.hint
+    assert "cybermap init" in captured.value.hint
 
 
 @pytest.mark.asyncio
@@ -361,7 +361,7 @@ async def test_unconfigured_planner_points_to_init_wizard():
     with pytest.raises(ProviderError) as captured:
         await router.generate("planner", system="s", prompt="p")
     assert captured.value.code == "model_provider_not_configured"
-    assert "fofamap init" in captured.value.hint
+    assert "cybermap init" in captured.value.hint
 
 
 def test_reflector_route_falls_back_to_query_repair_profile():

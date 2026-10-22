@@ -88,9 +88,9 @@ HOSTS: tuple[HostSupport, ...] = (
 )
 
 _BY_NAME = {name: host for host in HOSTS for name in (host.id, *host.aliases)}
-_BEGIN = "# >>> fofamap managed integration >>>"
-_END = "# <<< fofamap managed integration <<<"
-_MARKER = ".fofamap-managed.json"
+_BEGIN = "# >>> cybermap managed integration >>>"
+_END = "# <<< cybermap managed integration <<<"
+_MARKER = ".cybermap-managed.json"
 
 
 def supported_hosts() -> list[dict[str, Any]]:
@@ -133,7 +133,7 @@ def resolve_mcp_stdio(server_command: str | None = None) -> dict[str, Any]:
         importlib.import_module("mcp.server.mcpserver")
     except ImportError as exc:
         raise IntegrationError(
-            "当前 Python 环境缺少 FofaMap 2.0.1 所需的 mcp>=2,<3。"
+            "当前 Python 环境缺少 CyberMap 2.0.1 所需的 mcp>=2,<3。"
             "请先在虚拟环境中安装 Wheel 或执行 `python -m pip install .`，再重新运行 integrate。"
         ) from exc
     return {"command": python, "args": ["-u", server]}
@@ -142,7 +142,7 @@ def resolve_mcp_stdio(server_command: str | None = None) -> dict[str, Any]:
 def _backup(path: Path, dry_run: bool, changes: list[str]) -> None:
     if not path.exists():
         return
-    backup = path.with_name(f"{path.name}.fofamap.bak")
+    backup = path.with_name(f"{path.name}.cybermap.bak")
     if not backup.exists():
         changes.append(f"backup {path} -> {backup}")
         if not dry_run:
@@ -230,7 +230,7 @@ def _replace_managed_block(content: str, block: str | None) -> str:
     start = content.find(_BEGIN)
     end = content.find(_END)
     if (start < 0) != (end < 0) or (start >= 0 and end < start):
-        raise IntegrationError("发现不完整的 FofaMap 托管集成标记，请先手动修复")
+        raise IntegrationError("发现不完整的 CyberMap 托管集成标记，请先手动修复")
     if start >= 0:
         end += len(_END)
         content = (content[:start].rstrip() + "\n" + content[end:].lstrip("\n")).strip()
@@ -261,9 +261,9 @@ def _copy_managed(source: Path, destination: Path, *, kind: str, force: bool, dr
     if destination.exists():
         marker = destination / _MARKER
         if not marker.exists() and not force:
-            raise IntegrationError(f"拒绝覆盖非 FofaMap 管理的 {kind}：{destination}；确认后可使用 --force")
+            raise IntegrationError(f"拒绝覆盖非 CyberMap 管理的 {kind}：{destination}；确认后可使用 --force")
         if not marker.exists() and force:
-            backup = destination.with_name(f"{destination.name}.fofamap.bak")
+            backup = destination.with_name(f"{destination.name}.cybermap.bak")
             if backup.exists():
                 raise IntegrationError(f"备份目录已存在，无法安全覆盖：{backup}")
             changes.append(f"backup {destination} -> {backup}")
@@ -279,7 +279,7 @@ def _copy_managed(source: Path, destination: Path, *, kind: str, force: bool, dr
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copytree(source, destination)
         (destination / _MARKER).write_text(
-            json.dumps({"managed_by": "fofamap", "kind": kind, "version": "2.0.1"}, indent=2) + "\n", encoding="utf-8"
+            json.dumps({"managed_by": "cybermap", "kind": kind, "version": "2.0.1"}, indent=2) + "\n", encoding="utf-8"
         )
 
 
@@ -291,8 +291,8 @@ def _preflight_managed(destination: Path, *, kind: str, force: bool, uninstall: 
         return
     verb = "删除" if uninstall else "覆盖"
     if uninstall or not force:
-        raise IntegrationError(f"拒绝{verb}非 FofaMap 管理的 {kind}：{destination}" + ("；确认后可使用 --force" if not uninstall else ""))
-    backup = destination.with_name(f"{destination.name}.fofamap.bak")
+        raise IntegrationError(f"拒绝{verb}非 CyberMap 管理的 {kind}：{destination}" + ("；确认后可使用 --force" if not uninstall else ""))
+    backup = destination.with_name(f"{destination.name}.cybermap.bak")
     if backup.exists():
         raise IntegrationError(f"备份目录已存在，无法安全覆盖：{backup}")
 
@@ -303,7 +303,7 @@ def _remove_managed(destination: Path, *, kind: str, dry_run: bool, changes: lis
         return
     marker = destination / _MARKER
     if not marker.exists():
-        raise IntegrationError(f"拒绝删除非 FofaMap 管理的 {kind}：{destination}")
+        raise IntegrationError(f"拒绝删除非 CyberMap 管理的 {kind}：{destination}")
     changes.append(f"remove {destination}")
     if not dry_run:
         shutil.rmtree(destination)
@@ -315,7 +315,7 @@ def _install_skill(
     if uninstall:
         _remove_managed(destination, kind="skill", dry_run=dry_run, changes=changes)
     else:
-        _copy_managed(_asset_root() / "skills" / "fofamap", destination, kind="skill", force=force, dry_run=dry_run, changes=changes)
+        _copy_managed(_asset_root() / "skills" / "cybermap", destination, kind="skill", force=force, dry_run=dry_run, changes=changes)
 
 
 def _install_plugin(
@@ -330,7 +330,7 @@ def _install_plugin(
     if uninstall:
         _remove_managed(destination, kind="plugin", dry_run=dry_run, changes=changes)
         return
-    _copy_managed(_asset_root() / "plugins" / "fofamap", destination, kind="plugin", force=force, dry_run=dry_run, changes=changes)
+    _copy_managed(_asset_root() / "plugins" / "cybermap", destination, kind="plugin", force=force, dry_run=dry_run, changes=changes)
     if dry_run:
         return
     _set_plugin_launch(destination, stdio)
@@ -344,11 +344,11 @@ def _set_plugin_launch(destination: Path, stdio: dict[str, Any]) -> None:
             continue
         data = _read_json(path)
         try:
-            entry = data["mcpServers"]["fofamap"]
+            entry = data["mcpServers"]["cybermap"]
         except (KeyError, TypeError) as exc:
-            raise IntegrationError(f"插件清单缺少 mcpServers.fofamap：{path}") from exc
+            raise IntegrationError(f"插件清单缺少 mcpServers.cybermap：{path}") from exc
         if not isinstance(entry, dict):
-            raise IntegrationError(f"插件清单 mcpServers.fofamap 必须是对象：{path}")
+            raise IntegrationError(f"插件清单 mcpServers.cybermap 必须是对象：{path}")
         entry["command"] = stdio["command"]
         entry["args"] = list(stdio["args"])
         path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -377,13 +377,13 @@ def _install_openclaw_plugin(
         if not destination.exists():
             changes.append(f"absent {destination}")
             return True
-        command = [executable, "plugins", "uninstall", "fofamap", "--force"]
-        changes.append("run openclaw plugins uninstall fofamap --force")
+        command = [executable, "plugins", "uninstall", "cybermap", "--force"]
+        changes.append("run openclaw plugins uninstall cybermap --force")
     elif destination.exists():
         return False
     else:
-        command = [executable, "plugins", "install", str(_asset_root() / "plugins" / "fofamap")]
-        changes.append("run openclaw plugins install <fofamap-bundle>")
+        command = [executable, "plugins", "install", str(_asset_root() / "plugins" / "cybermap")]
+        changes.append("run openclaw plugins install <cybermap-bundle>")
     if dry_run:
         return True
     completed = subprocess.run(command, capture_output=True, text=True, check=False, env=env)  # noqa: S603
@@ -393,7 +393,7 @@ def _install_openclaw_plugin(
     if not uninstall:
         marker = destination / _MARKER
         marker.write_text(
-            json.dumps({"managed_by": "fofamap", "kind": "plugin", "version": "2.0.1"}, indent=2) + "\n",
+            json.dumps({"managed_by": "cybermap", "kind": "plugin", "version": "2.0.1"}, indent=2) + "\n",
             encoding="utf-8",
         )
         _set_plugin_launch(destination, stdio)
@@ -405,35 +405,35 @@ def _paths(host: str, scope: str, root: Path, home: Path) -> tuple[Path | None, 
     mapping: dict[str, tuple[Path | None, Path | None]] = {
         "cursor": (
             root / ".cursor" / "mcp.json" if project else home / ".cursor" / "mcp.json",
-            root / ".cursor" / "skills" / "fofamap" if project else home / ".cursor" / "skills" / "fofamap",
+            root / ".cursor" / "skills" / "cybermap" if project else home / ".cursor" / "skills" / "cybermap",
         ),
         "codex": (
             root / ".codex" / "config.toml" if project else home / ".codex" / "config.toml",
-            root / ".agents" / "skills" / "fofamap" if project else home / ".agents" / "skills" / "fofamap",
+            root / ".agents" / "skills" / "cybermap" if project else home / ".agents" / "skills" / "cybermap",
         ),
         "claude": (
             root / ".mcp.json" if project else home / ".claude.json",
-            root / ".claude" / "skills" / "fofamap" if project else home / ".claude" / "skills" / "fofamap",
+            root / ".claude" / "skills" / "cybermap" if project else home / ".claude" / "skills" / "cybermap",
         ),
         "opencode": (
             root / "opencode.json" if project else home / ".config" / "opencode" / "opencode.json",
-            root / ".opencode" / "skills" / "fofamap" if project else home / ".config" / "opencode" / "skills" / "fofamap",
+            root / ".opencode" / "skills" / "cybermap" if project else home / ".config" / "opencode" / "skills" / "cybermap",
         ),
         "deepseek-harness": (
-            root / ".dsh" / "fofamap.cordis.yml" if project else home / ".dsh" / "cordis.patch.yml",
-            root / ".dsh" / "skills" / "fofamap" if project else home / ".dsh" / "skills" / "fofamap",
+            root / ".dsh" / "cybermap.cordis.yml" if project else home / ".dsh" / "cordis.patch.yml",
+            root / ".dsh" / "skills" / "cybermap" if project else home / ".dsh" / "skills" / "cybermap",
         ),
-        "lmstudio": (home / ".lmstudio" / "mcp.json", home / ".lmstudio" / "skills" / "fofamap"),
+        "lmstudio": (home / ".lmstudio" / "mcp.json", home / ".lmstudio" / "skills" / "cybermap"),
         "openclaw": (
-            root / ".openclaw" / "extensions" / "fofamap" if project else home / ".openclaw" / "extensions" / "fofamap",
+            root / ".openclaw" / "extensions" / "cybermap" if project else home / ".openclaw" / "extensions" / "cybermap",
             None,
         ),
         "hermes": (
             home / ".hermes" / "config.yaml",
-            root / ".agents" / "skills" / "fofamap" if project else home / ".hermes" / "skills" / "fofamap",
+            root / ".agents" / "skills" / "cybermap" if project else home / ".hermes" / "skills" / "cybermap",
         ),
         "grok": (
-            root / ".grok" / "plugins" / "fofamap" if project else home / ".grok" / "plugins" / "fofamap",
+            root / ".grok" / "plugins" / "cybermap" if project else home / ".grok" / "plugins" / "cybermap",
             None,
         ),
     }
@@ -499,7 +499,7 @@ def integrate_host(
     if host.id in {"cursor", "claude", "lmstudio"}:
         _json_config(
             config_path,
-            ("mcpServers", "fofamap"),
+            ("mcpServers", "cybermap"),
             stdio,
             uninstall=uninstall,
             dry_run=dry_run,
@@ -508,22 +508,22 @@ def integrate_host(
     elif host.id == "opencode":
         _json_config(
             config_path,
-            ("mcp", "fofamap"),
+            ("mcp", "cybermap"),
             {"type": "local", "command": [stdio["command"], *stdio["args"]], "enabled": True},
             uninstall=uninstall,
             dry_run=dry_run,
             changes=result.changes,
         )
     elif host.id == "codex":
-        block = f'[mcp_servers.fofamap]\ncommand = {json.dumps(stdio["command"])}\nargs = {json.dumps(stdio["args"])}'
+        block = f'[mcp_servers.cybermap]\ncommand = {json.dumps(stdio["command"])}\nargs = {json.dumps(stdio["args"])}'
         _managed_config(config_path, block, uninstall=uninstall, dry_run=dry_run, changes=result.changes)
     elif host.id == "deepseek-harness":
         block = (
             "- insert:\n"
-            "    - id: mcp-fofamap\n"
+            "    - id: mcp-cybermap\n"
             "      name: '@deepseek-ai/dsh-mcp-client'\n"
             "      config:\n"
-            "        serverName: fofamap\n"
+            "        serverName: cybermap\n"
             "        transport: stdio\n"
             f"        command: {json.dumps(stdio['command'])}\n"
             f"        args: {json.dumps(stdio['args'])}\n"
@@ -544,9 +544,9 @@ def integrate_host(
         if not isinstance(data, dict):
             raise IntegrationError(f"Hermes 配置根节点必须是对象：{config_path}")
         if uninstall:
-            changed = _remove_nested(data, ("mcp_servers", "fofamap"))
+            changed = _remove_nested(data, ("mcp_servers", "cybermap"))
         else:
-            _set_nested(data, ("mcp_servers", "fofamap"), {**stdio, "enabled": True, "trust": "untrusted"})
+            _set_nested(data, ("mcp_servers", "cybermap"), {**stdio, "enabled": True, "trust": "untrusted"})
             changed = True
         if changed:
             _write_text(
@@ -556,10 +556,10 @@ def integrate_host(
                 changes=result.changes,
             )
         else:
-            result.changes.append(f"absent {config_path}:mcp_servers.fofamap")
+            result.changes.append(f"absent {config_path}:mcp_servers.cybermap")
 
     _install_skill(skill_path, uninstall=uninstall, force=force, dry_run=dry_run, changes=result.changes)
     if host.id == "lmstudio":
         encoded = base64.b64encode(json.dumps(stdio, separators=(",", ":")).encode()).decode()
-        result.deeplink = f"lmstudio://add_mcp?name=fofamap&config={quote(encoded, safe='')}"
+        result.deeplink = f"lmstudio://add_mcp?name=cybermap&config={quote(encoded, safe='')}"
     return result

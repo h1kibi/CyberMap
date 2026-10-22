@@ -1,0 +1,7 @@
+{
+  "name": "cybermap-agent-plugin",
+  "version": "2.0.1",
+  "description": "Cross-host CyberMap MCP and Agent Skill bundle for multi-engine asset research.",
+  "license": "Apache-2.0",
+  "private": true
+}

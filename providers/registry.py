@@ -42,7 +42,7 @@ class ProviderRegistry:
             raise ProviderError(
                 f"AI 提供商 {name!r} 尚未配置。",
                 code="model_provider_not_configured",
-                hint="运行 `fofamap init` 重新配置 AI 提供商、模型 ID 和 API 密钥。",
+                hint="运行 `cybermap init` 重新配置 AI 提供商、模型 ID 和 API 密钥。",
             )
         return self.providers[name]
 
@@ -69,7 +69,7 @@ class ProviderRouter:
             raise ProviderError(
                 f"任务 {task!r} 没有配置可用的 AI 提供商。",
                 code="model_provider_not_configured",
-                hint="运行 `fofamap init`，选择 AI 提供商并配置默认模型。",
+                hint="运行 `cybermap init`，选择 AI 提供商并配置默认模型。",
             )
         candidates = [primary]
         routing = self.registry.config.routing

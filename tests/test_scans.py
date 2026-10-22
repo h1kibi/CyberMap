@@ -54,7 +54,7 @@ def test_unknown_is_a_supported_explicit_nuclei_severity():
 
 
 def test_scan_approval_is_scope_bound_and_one_time(tmp_path: Path, monkeypatch):
-    monkeypatch.setenv("FOFAMAP_NUCLEI_ID_ALLOWLIST", "http-missing-security-headers")
+    monkeypatch.setenv("CYBERMAP_NUCLEI_ID_ALLOWLIST", "http-missing-security-headers")
     store = JobStore(f"sqlite:///{tmp_path / 'jobs.sqlite3'}")
     approvals = ScanApproval(store, "a-secure-test-secret-that-is-long", allow_private=True)
     job, token = approvals.create(

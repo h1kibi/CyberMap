@@ -104,7 +104,7 @@ async def test_scanner_omits_severity_filter_for_unknown_template_ids(tmp_path: 
         captured.append(command)
         return FakeProcess()
 
-    monkeypatch.setenv("FOFAMAP_NUCLEI_ID_ALLOWLIST", "custom-http-check")
+    monkeypatch.setenv("CYBERMAP_NUCLEI_ID_ALLOWLIST", "custom-http-check")
     monkeypatch.setattr("core.scanner.asyncio.create_subprocess_exec", fake_exec)
     await NucleiScanner(executable="/opt/tools/nuclei").run_plan(
         ScanPlanRequest(
@@ -231,7 +231,7 @@ def test_resolve_nuclei_prefers_project_root_binary(tmp_path, monkeypatch):
     binary = tmp_path / "nuclei"
     binary.write_text("#!/bin/sh\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.delenv("FOFAMAP_NUCLEI", raising=False)
+    monkeypatch.delenv("CYBERMAP_NUCLEI", raising=False)
     monkeypatch.setattr("core.scanner.shutil.which", lambda *_args, **_kwargs: None)
     from core.scanner import resolve_nuclei_executable
 

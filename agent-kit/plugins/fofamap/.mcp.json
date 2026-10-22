@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "fofamap": {
-      "command": "fofamap-mcp",
-      "args": []
-    }
-  }
-}

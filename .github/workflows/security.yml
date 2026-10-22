@@ -39,4 +39,4 @@ jobs:
         with:
           python-version: "3.13"
       - run: pip install -e ".[test]"
-      - run: ruff check config core providers service utils fofamap.py mcp_server.py tests
+      - run: ruff check config core providers service utils cybermap.py mcp_server.py tests

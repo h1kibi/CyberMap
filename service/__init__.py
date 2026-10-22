@@ -1,1 +1,1 @@
-"""Self-hosted FofaMap REST and job services."""
+"""Self-hosted CyberMap REST and job services."""

@@ -12,6 +12,17 @@ from typing import Any, Literal
 import yaml
 from pydantic import BaseModel, Field
 
+# Engine secrets follow the provider convention: keyring service per engine and the
+# environment variable name as the keyring username.
+SHODAN_API_KEY_ENV = "SHODAN_API_KEY"
+SHODAN_KEYRING_SERVICE = "cybermap-shodan"
+HUNTER_API_KEY_ENV = "HUNTER_API_KEY"
+HUNTER_KEYRING_SERVICE = "cybermap-hunter"
+CENSYS_API_TOKEN_ENV = "CENSYS_API_TOKEN"  # noqa: S105 - environment variable name, not a secret
+CENSYS_KEYRING_SERVICE = "cybermap-censys"
+DAYDAYMAP_API_KEY_ENV = "DAYDAYMAP_API_KEY"
+DAYDAYMAP_KEYRING_SERVICE = "cybermap-daydaymap"
+
 
 class FofaConfig(BaseModel):
     base_url: str = "https://fofa.info"
@@ -19,7 +30,49 @@ class FofaConfig(BaseModel):
     api_key: str = ""
 
 
+class ShodanConfig(BaseModel):
+    base_url: str = "https://api.shodan.io"
+    api_key: str = ""
+    # Shodan documents a 1 request/second limit for every plan, so the shared
+    # system.requests_per_second default is overridden unless this is set to null.
+    requests_per_second: float | None = 1.0
+
+
+class HunterConfig(BaseModel):
+    base_url: str = "https://hunter.qianxin.com"
+    api_key: str = ""
+    requests_per_second: float | None = 1.0
+
+
+class DaydaymapConfig(BaseModel):
+    """DayDayMap open API: one POST endpoint, `api-key` header, base64 query, numbered pages."""
+
+    base_url: str = "https://www.daydaymap.com"
+    api_key: str = ""
+    # The API documents no public rate limit; 1 req/s keeps a batch polite and under the WAF.
+    requests_per_second: float | None = 1.0
+
+
+class CensysConfig(BaseModel):
+    # Platform API (v3). The Free plan only exposes entity lookups, which is why the
+    # Censys engine is a host-profile/enrichment source rather than a list-search engine.
+    base_url: str = "https://api.platform.censys.io"
+    api_token: str = ""
+    requests_per_second: float | None = 1.0
+
+
+class CacheConfig(BaseModel):
+    """Page cache: reuse already-paid engine pages instead of spending quota again."""
+
+    enabled: bool = True
+    ttl_hours: float = Field(default=24.0, gt=0)
+    max_entries: int = Field(default=5000, ge=1)
+    # Empty keeps the cache next to the working directory (cybermap-cache.sqlite3).
+    path: str = ""
+
+
 class SearchConfig(BaseModel):
+    engine: Literal["fofa", "shodan", "hunter", "daydaymap", "censys", "all"] = "fofa"
     fields: str = "host,protocol,ip,port,title,domain,country"
     size: int = Field(default=100, ge=1, le=10_000)
     full: bool = False
@@ -82,6 +135,11 @@ class LegacyUserInfo(BaseModel):
 
 class Config(BaseModel):
     fofa: FofaConfig = Field(default_factory=FofaConfig)
+    shodan: ShodanConfig = Field(default_factory=ShodanConfig)
+    hunter: HunterConfig = Field(default_factory=HunterConfig)
+    daydaymap: DaydaymapConfig = Field(default_factory=DaydaymapConfig)
+    censys: CensysConfig = Field(default_factory=CensysConfig)
+    cache: CacheConfig = Field(default_factory=CacheConfig)
     search: SearchConfig = Field(default_factory=SearchConfig)
     fast_check: FastCheckConfig = Field(default_factory=FastCheckConfig)
     system: SystemConfig = Field(default_factory=SystemConfig)
@@ -97,13 +155,43 @@ def _read_yaml(path: Path) -> dict[str, Any]:
         return yaml.safe_load(handle) or {}
 
 
-def _keyring_secret(email: str) -> str:
+def _keyring_secret(service: str, username: str) -> str:
     try:
         import keyring  # type: ignore
 
-        return keyring.get_password("fofamap", email or "default") or ""
+        return keyring.get_password(service, username) or ""
     except Exception:
         return ""
+
+
+def _warn_plaintext_secret(label: str, env_name: str) -> None:
+    """Plaintext engine keys must be visible: a DeprecationWarning is hidden by default filters."""
+    warnings.warn(
+        f"YAML 中的 {label} API 密钥已过时且不安全；请改用 {env_name}、系统钥匙串或容器密钥。",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _load_engine_secret(
+    data: dict[str, Any],
+    *,
+    section: str,
+    label: str,
+    env_name: str,
+    keyring_service: str,
+    env: dict[str, str],
+    confirmed: bool,
+    field_name: str = "api_key",
+) -> None:
+    """Resolve one engine key from the environment, the OS keyring, then a confirmed local YAML."""
+    section_data = dict(data.get(section) or {})
+    yaml_key = section_data.get(field_name) or section_data.get("api_key") or section_data.get("key") or ""
+    if yaml_key and not confirmed:
+        _warn_plaintext_secret(label, env_name)
+    section_data[field_name] = env.get(env_name) or _keyring_secret(keyring_service, env_name) or yaml_key
+    section_data.pop("key", None)
+    data[section] = section_data
 
 
 def user_config_path(*, environ: dict[str, str] | None = None, home: Path | None = None, platform: str | None = None) -> Path:
@@ -113,11 +201,11 @@ def user_config_path(*, environ: dict[str, str] | None = None, home: Path | None
     current_platform = sys.platform if platform is None else platform
     if current_platform == "win32":
         root = Path(env.get("APPDATA") or user_home / "AppData" / "Roaming")
-        return root / "FofaMap" / "settings.yaml"
+        return root / "CyberMap" / "settings.yaml"
     if current_platform == "darwin":
-        return user_home / "Library" / "Application Support" / "FofaMap" / "settings.yaml"
+        return user_home / "Library" / "Application Support" / "CyberMap" / "settings.yaml"
     root = Path(env.get("XDG_CONFIG_HOME") or user_home / ".config")
-    return root / "fofamap" / "settings.yaml"
+    return root / "cybermap" / "settings.yaml"
 
 
 def config_write_path(
@@ -129,8 +217,8 @@ def config_write_path(
 ) -> Path:
     """Choose the init destination: explicit path, source checkout, then user config."""
     env = os.environ if environ is None else environ
-    if env.get("FOFAMAP_CONFIG"):
-        return Path(env["FOFAMAP_CONFIG"]).expanduser()
+    if env.get("CYBERMAP_CONFIG"):
+        return Path(env["CYBERMAP_CONFIG"]).expanduser()
     working_directory = Path.cwd() if cwd is None else cwd
     if (working_directory / "config" / "settings.example.yaml").is_file():
         return working_directory / "config" / "settings.yaml"
@@ -138,8 +226,8 @@ def config_write_path(
 
 
 def _default_read_path(env: dict[str, str]) -> Path:
-    if env.get("FOFAMAP_CONFIG"):
-        return Path(env["FOFAMAP_CONFIG"]).expanduser()
+    if env.get("CYBERMAP_CONFIG"):
+        return Path(env["CYBERMAP_CONFIG"]).expanduser()
     project_config = Path.cwd() / "config" / "settings.yaml"
     if project_config.is_file():
         return project_config
@@ -161,18 +249,64 @@ def load_config(path: str | Path | None = None, environ: dict[str, str] | None =
     yaml_email = fofa_data.get("email") or legacy.get("email") or ""
     yaml_key = fofa_data.get("api_key") or fofa_data.get("key") or legacy.get("key") or ""
     if yaml_key and not local_yaml_secrets_confirmed:
-        warnings.warn(
-            "YAML 中的 FOFA API 密钥已过时且不安全；请改用 FOFA_API_KEY、系统钥匙串或容器密钥。",
-            DeprecationWarning,
-            stacklevel=2,
-        )
+        _warn_plaintext_secret("FOFA", "FOFA_API_KEY")
 
     email = env.get("FOFA_EMAIL", yaml_email)
-    api_key = env.get("FOFA_API_KEY") or env.get("FOFA_KEY") or _keyring_secret(email) or yaml_key
+    api_key = env.get("FOFA_API_KEY") or env.get("FOFA_KEY") or _keyring_secret("cybermap", email or "default") or yaml_key
     fofa_data.update({"email": email, "api_key": api_key})
     data["fofa"] = fofa_data
 
-    providers_json = env.get("FOFAMAP_PROVIDERS_JSON")
+    _load_engine_secret(
+        data,
+        section="shodan",
+        label="Shodan",
+        env_name=SHODAN_API_KEY_ENV,
+        keyring_service=SHODAN_KEYRING_SERVICE,
+        env=env,
+        confirmed=local_yaml_secrets_confirmed,
+    )
+    _load_engine_secret(
+        data,
+        section="hunter",
+        label="Hunter",
+        env_name=HUNTER_API_KEY_ENV,
+        keyring_service=HUNTER_KEYRING_SERVICE,
+        env=env,
+        confirmed=local_yaml_secrets_confirmed,
+    )
+    _load_engine_secret(
+        data,
+        section="daydaymap",
+        label="DayDayMap",
+        env_name=DAYDAYMAP_API_KEY_ENV,
+        keyring_service=DAYDAYMAP_KEYRING_SERVICE,
+        env=env,
+        confirmed=local_yaml_secrets_confirmed,
+    )
+    _load_engine_secret(
+        data,
+        section="censys",
+        label="Censys",
+        env_name=CENSYS_API_TOKEN_ENV,
+        keyring_service=CENSYS_KEYRING_SERVICE,
+        env=env,
+        confirmed=local_yaml_secrets_confirmed,
+        field_name="api_token",
+    )
+
+    cache_data = dict(data.get("cache") or {})
+    if env.get("CYBERMAP_CACHE_PATH"):
+        cache_data["path"] = env["CYBERMAP_CACHE_PATH"]
+    if env.get("CYBERMAP_CACHE_TTL_HOURS"):
+        try:
+            cache_data["ttl_hours"] = float(env["CYBERMAP_CACHE_TTL_HOURS"])
+        except ValueError:
+            pass
+    if env.get("CYBERMAP_DISABLE_CACHE", "").lower() in {"1", "true", "yes"}:
+        cache_data["enabled"] = False
+    data["cache"] = cache_data
+
+    providers_json = env.get("CYBERMAP_PROVIDERS_JSON")
     if providers_json:
         data["providers"] = json.loads(providers_json)
     elif not data.get("providers") and legacy:
@@ -190,7 +324,7 @@ def load_config(path: str | Path | None = None, environ: dict[str, str] | None =
         if legacy_model_key:
             warnings.warn(
                 "旧版 YAML 中的模型 API 密钥已过时且不安全；请迁移到提供商环境变量或系统钥匙串。",
-                DeprecationWarning,
+                UserWarning,
                 stacklevel=2,
             )
         data["providers"] = {
@@ -222,15 +356,15 @@ def load_config(path: str | Path | None = None, environ: dict[str, str] | None =
         ):
             warnings.warn(
                 f"提供商 {provider_name!r} 的模型 API 密钥写在配置文件中；请确保该文件私有且已被 Git 忽略。",
-                DeprecationWarning,
+                UserWarning,
                 stacklevel=2,
             )
             provider_data["api_key"] = provider_data.get("api_key") or provider_data.get("key")
     system_data = dict(data.get("system") or {})
-    if "FOFAMAP_ALLOW_PRIVATE_NETWORK" in env:
-        system_data["allow_private_network"] = env["FOFAMAP_ALLOW_PRIVATE_NETWORK"].lower() == "true"
-    if "FOFAMAP_ARTIFACT_RETENTION_DAYS" in env:
-        system_data["artifact_retention_days"] = int(env["FOFAMAP_ARTIFACT_RETENTION_DAYS"])
+    if "CYBERMAP_ALLOW_PRIVATE_NETWORK" in env:
+        system_data["allow_private_network"] = env["CYBERMAP_ALLOW_PRIVATE_NETWORK"].lower() == "true"
+    if "CYBERMAP_ARTIFACT_RETENTION_DAYS" in env:
+        system_data["artifact_retention_days"] = int(env["CYBERMAP_ARTIFACT_RETENTION_DAYS"])
     data["system"] = system_data
 
     # v2 read compatibility only. New code consumes settings.fofa/providers.

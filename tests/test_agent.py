@@ -5,20 +5,20 @@ from rich.console import Console
 
 from config import Config
 from core.agent import (
-    SEARCH_SUMMARY_SYSTEM,
+    ASSET_PREVIEW_LIMIT,
     AgentQuery,
     AgentRun,
     AgentState,
-    FofaAgent,
+    AssetAgent,
     _asset_briefing_has_sufficient_quality,
     _asset_briefing_stats,
     _derive_website_candidates,
-    _deterministic_fallback_plan,
     _local_search_summary,
     _search_summary_prompt,
     user_authorized_scan,
 )
-from core.models import AssetRecord, FofaError, FofaErrorCode, SearchPage
+from core.agent_profiles import agent_profile, briefing_system, fofa_fallback_plan
+from core.models import AssetRecord, FofaError, FofaErrorCode, SearchPage, SearchRequest
 from core.scans import default_nuclei_template_ids
 from providers.base import ModelResult, ProviderError
 from providers.registry import ProviderRegistry, ProviderRouter
@@ -296,8 +296,15 @@ class OrganizationHypothesisClient:
             ]
             yield SearchPage(query=request.query, fields=request.fields, records=records, total=4)
             return
+        if request.query.startswith('org="'):
+            # The bundle's organization pivot: this fixture's scenario is hypothesis vs broad recall,
+            # so the extra pivot returns nothing.
+            yield SearchPage(query=request.query, fields=request.fields, records=[], total=0)
+            return
+        # Deliberately no `domain` field: this fixture models unrelated noise, and carrying a domain
+        # would (correctly) seed a derived pivot that is out of scope for this test.
         records = [
-            AssetRecord(values={"host": f"https://noise-{index}.example.com", "domain": "example.com"})
+            AssetRecord(values={"host": f"https://noise-{index}.example.com"})
             for index in range(request.max_records)
         ]
         yield SearchPage(query=request.query, fields=request.fields, records=records, total=670)
@@ -429,9 +436,11 @@ class ProfessionalTierClient:
 
     def __init__(self):
         self.request = None
+        self.requests: list[SearchRequest] = []
 
     async def iter_search(self, request):
         self.request = request
+        self.requests.append(request)
         yield SearchPage(query=request.query, fields=request.fields, records=[])
 
 
@@ -554,7 +563,7 @@ class RoutedActionClient:
 @pytest.mark.asyncio
 async def test_agent_never_reflects_on_auth_failure():
     router = FakeRouter()
-    run = await FofaAgent(AuthFailureClient(), router).run("find nginx")
+    run = await AssetAgent(AuthFailureClient(), router).run("find nginx")
     assert run.state is AgentState.FAILED
     assert run.error["code"] == "auth_failed"
     assert router.calls == ["planner"]
@@ -565,7 +574,7 @@ async def test_agent_routes_single_host_profile_without_running_asset_search():
     client = RoutedActionClient()
     router = RoutedActionRouter("host_query")
 
-    run = await FofaAgent(client, router).run("分析 8.8.8.8 的开放端口")
+    run = await AssetAgent(client, router).run("分析 8.8.8.8 的开放端口")
 
     assert run.state is AgentState.COMPLETED
     assert run.action.value == "host_query"
@@ -580,7 +589,7 @@ async def test_agent_routes_statistics_and_filters_dimensions():
     client = RoutedActionClient()
     router = RoutedActionRouter("stat_query")
 
-    run = await FofaAgent(client, router).run("统计全球 Redis 的国家和端口分布")
+    run = await AssetAgent(client, router).run("统计全球 Redis 的国家和端口分布")
 
     assert run.state is AgentState.COMPLETED
     assert run.action.value == "stat_query"
@@ -644,7 +653,7 @@ class MembershipAwareStatsRouter(FakeRouter):
 @pytest.mark.asyncio
 async def test_personal_membership_downgrades_stats_to_search():
     client = PersonalMembershipClient()
-    run = await FofaAgent(client, MembershipAwareStatsRouter()).run("统计全球 Redis 的国家和端口分布")
+    run = await AssetAgent(client, MembershipAwareStatsRouter()).run("统计全球 Redis 的国家和端口分布")
 
     assert run.action.value == "fofa_search"
     assert client.stats_calls == []
@@ -656,7 +665,7 @@ async def test_personal_membership_downgrades_stats_to_search():
 @pytest.mark.asyncio
 async def test_registered_membership_downgrades_host_to_search():
     client = RegisteredMembershipClient()
-    run = await FofaAgent(client, RoutedActionRouter("host_query")).run("分析 8.8.8.8 的开放端口")
+    run = await AssetAgent(client, RoutedActionRouter("host_query")).run("分析 8.8.8.8 的开放端口")
 
     assert run.action.value == "fofa_search"
     assert client.host_calls == []
@@ -669,7 +678,7 @@ async def test_registered_membership_downgrades_host_to_search():
 async def test_agent_builds_bounded_scan_plan_when_user_explicitly_requests_it():
     router = ScanRouter()
     progress = []
-    run = await FofaAgent(SuccessfulClient(), router).run(
+    run = await AssetAgent(SuccessfulClient(), router).run(
         "收集哈佛大学子域名网站，并扫描一下",
         on_progress=lambda current, step: progress.append((current.state, step.detail)),
     )
@@ -691,7 +700,7 @@ async def test_agent_builds_bounded_scan_plan_when_user_explicitly_requests_it()
 
 @pytest.mark.asyncio
 async def test_agent_respects_an_exact_template_id_named_by_the_user():
-    run = await FofaAgent(SuccessfulClient(), ScanRouter()).run(
+    run = await AssetAgent(SuccessfulClient(), ScanRouter()).run(
         "收集哈佛大学子域名网站，并只用 cors-misconfig 扫描"
     )
 
@@ -708,11 +717,13 @@ async def test_agent_page_observer_can_annotate_alive_status_before_assets_are_s
         for record in page.records:
             record.values["alive_status"] = 200
 
-    run = await FofaAgent(SuccessfulClient(), ScanRouter()).run(
+    run = await AssetAgent(SuccessfulClient(), ScanRouter()).run(
         "收集哈佛大学子域名网站，并扫描一下",
         on_page=on_page,
     )
-    assert seen == [0]
+    # A Chinese organization name gets no intent pivot (FOFA/Shodan index Latin organization names,
+    # measured), but the first batch's own result seeds a derived pivot, so two pages arrive.
+    assert seen == [0, 1]
     assert run.assets[0]["alive_status"] == 200
 
 
@@ -821,10 +832,11 @@ def test_search_summary_is_an_asset_briefing_not_a_methods_report():
     assert "chinaccs.cn" in prompt
     assert "西南交通大学" in prompt
     assert "世界杯开户平台" in prompt
-    assert "do not recount how many FOFA queries ran" in SEARCH_SUMMARY_SYSTEM
-    assert "## 结论" in SEARCH_SUMMARY_SYSTEM
-    assert "at most 3 hosts per bullet" in SEARCH_SUMMARY_SYSTEM
-    assert "Do not write chain-of-thought" in SEARCH_SUMMARY_SYSTEM
+    briefing = briefing_system("FOFA")
+    assert "do not recount how many FOFA queries ran" in briefing
+    assert "## 结论" in briefing
+    assert "at most 3 hosts per bullet" in briefing
+    assert "Do not write chain-of-thought" in briefing
     local = _local_search_summary(run)
     assert local.startswith("## 结论")
     assert "`chinaccs.cn` ×2" in local
@@ -877,10 +889,13 @@ def test_markdown_level_one_headings_are_left_aligned():
 async def test_agent_reflects_on_zero_results_and_tries_a_complementary_query():
     router = ZeroRepairRouter()
     client = ZeroThenResultClient()
-    run = await FofaAgent(client, router).run("查找 example.invalid")
+    run = await AssetAgent(client, router).run("查找 example.invalid")
+
     assert run.state is AgentState.COMPLETED
     assert run.result_count == 1
-    assert client.calls == 2
+    # The intent names a domain, so the bundle adds its certificate pivot; together with the
+    # reflection query that makes three requests.
+    assert client.calls == 3
     assert router.calls == ["planner", "reflector", "summarizer"]
 
 
@@ -888,7 +903,7 @@ async def test_agent_reflects_on_zero_results_and_tries_a_complementary_query():
 async def test_agent_cancels_scan_recommendation_when_no_assets_exist():
     router = ScanRouter()
 
-    run = await FofaAgent(ZeroThenResultClient(), router).run("查找并扫描不存在的测试资产")
+    run = await AssetAgent(ZeroThenResultClient(), router).run("查找并扫描不存在的测试资产")
 
     assert run.result_count == 0
     assert run.scan_recommended is False
@@ -901,7 +916,7 @@ async def test_agent_cancels_scan_recommendation_when_no_assets_exist():
 async def test_agent_plans_reflects_and_deduplicates_multiple_query_dimensions():
     router = MultiQueryRouter()
 
-    run = await FofaAgent(MultiQueryClient(), router).run("尽可能从多维度发现 Example University 资产")
+    run = await AssetAgent(MultiQueryClient(), router).run("尽可能从多维度发现 Example University 资产")
 
     assert run.state is AgentState.COMPLETED
     assert [item.query for item in run.queries] == [
@@ -927,7 +942,7 @@ async def test_agent_plans_reflects_and_deduplicates_multiple_query_dimensions()
 async def test_unused_query_budget_flows_to_later_strategies():
     client = BudgetRecordingClient()
 
-    run = await FofaAgent(client, DynamicBudgetRouter()).run("find Example assets", max_records=500)
+    run = await AssetAgent(client, DynamicBudgetRouter()).run("find Example assets", max_records=500)
 
     assert run.state is AgentState.COMPLETED
     assert client.budgets == [167, 250, 500]
@@ -935,7 +950,7 @@ async def test_unused_query_budget_flows_to_later_strategies():
 
 @pytest.mark.asyncio
 async def test_organization_domain_hypotheses_are_queried_before_broad_recall_and_labeled():
-    run = await FofaAgent(OrganizationHypothesisClient(), OrganizationHypothesisRouter()).run(
+    run = await AssetAgent(OrganizationHypothesisClient(), OrganizationHypothesisRouter()).run(
         "帮我收集安徽省邮电职业技术学院的全网资产"
     )
 
@@ -952,7 +967,7 @@ async def test_organization_domain_hypotheses_are_queried_before_broad_recall_an
 
 @pytest.mark.asyncio
 async def test_late_precision_assets_replace_early_lower_confidence_preview_rows():
-    run = await FofaAgent(LatePrecisionClient(), LatePrecisionRouter()).run("find Example assets")
+    run = await AssetAgent(LatePrecisionClient(), LatePrecisionRouter()).run("find Example assets")
 
     assert run.result_count == 501
     assert len(run.assets) == 500
@@ -966,7 +981,7 @@ async def test_late_precision_assets_replace_early_lower_confidence_preview_rows
 async def test_agent_uses_two_correction_rounds_instead_of_stopping_after_first_zero_result():
     router = TwoRoundReflectionRouter()
 
-    run = await FofaAgent(TwoRoundReflectionClient(), router).run("查找示例科技有限公司的公开资产")
+    run = await AssetAgent(TwoRoundReflectionClient(), router).run("查找示例科技有限公司的公开资产")
 
     assert run.state is AgentState.COMPLETED
     assert run.reflection_rounds == 2
@@ -989,7 +1004,7 @@ async def test_agent_uses_two_correction_rounds_instead_of_stopping_after_first_
     ],
 )
 def test_fallback_plan_extracts_organization_core_name(intent, expected_term):
-    plan = _deterministic_fallback_plan(intent)
+    plan = fofa_fallback_plan(intent)
     query = plan["queries"][0]["query"]
     assert expected_term in query
     assert "子域名网站" not in query
@@ -1031,7 +1046,7 @@ def test_website_inventory_surfaces_hx0_sites_with_explicit_evidence_status():
         asset_confidence=["balanced", "hypothesis", "recall", "balanced"],
     )
 
-    candidates = _derive_website_candidates(run)
+    candidates = _derive_website_candidates(run, agent_profile(None))
 
     assert [item.domain for item in candidates] == ["hx0.com.cn", "hx0.store", "hx0studio.com"]
     assert all(item.status == "corroborated" for item in candidates)
@@ -1055,7 +1070,7 @@ def test_same_name_certificate_without_icp_is_not_promoted_to_corrobated():
         asset_confidence=["recall"],
     )
 
-    candidate = _derive_website_candidates(run)[0]
+    candidate = _derive_website_candidates(run, agent_profile(None))[0]
 
     assert candidate.domain == "hx0.de"
     assert candidate.status == "candidate"
@@ -1066,7 +1081,7 @@ def test_same_name_certificate_without_icp_is_not_promoted_to_corrobated():
 async def test_invalid_planner_json_falls_back_to_safe_executable_search():
     router = PlannerStructuredFailureRouter()
 
-    run = await FofaAgent(BulkResultClient(1), router).run("帮我查询Hx0工作室的全网资产并扫描")
+    run = await AssetAgent(BulkResultClient(1), router).run("帮我查询Hx0工作室的全网资产并扫描")
 
     assert run.state is AgentState.COMPLETED
     assert run.error is None
@@ -1086,7 +1101,7 @@ async def test_fallback_name_query_runs_after_official_domain_hypotheses():
         ]
     )
 
-    run = await FofaAgent(BulkResultClient(1), router).run("收集美国哈佛大学的子域名网站，并扫描一下")
+    run = await AssetAgent(BulkResultClient(1), router).run("收集美国哈佛大学的子域名网站，并扫描一下")
 
     assert [item.source for item in run.queries] == ["entity_resolution", "planner"]
     assert 'domain="harvard.edu"' in run.queries[0].query
@@ -1097,7 +1112,7 @@ async def test_fallback_name_query_runs_after_official_domain_hypotheses():
 
 @pytest.mark.asyncio
 async def test_agent_keeps_all_assets_when_result_count_is_at_most_500():
-    run = await FofaAgent(BulkResultClient(500), FakeRouter()).run("find example assets")
+    run = await AssetAgent(BulkResultClient(500), FakeRouter()).run("find example assets")
 
     assert run.result_count == 500
     assert len(run.assets) == 500
@@ -1106,7 +1121,7 @@ async def test_agent_keeps_all_assets_when_result_count_is_at_most_500():
 
 @pytest.mark.asyncio
 async def test_agent_caps_asset_preview_only_above_500():
-    run = await FofaAgent(BulkResultClient(501), FakeRouter()).run("find example assets")
+    run = await AssetAgent(BulkResultClient(501), FakeRouter()).run("find example assets")
 
     assert run.result_count == 501
     assert len(run.assets) == 500
@@ -1117,10 +1132,12 @@ async def test_agent_caps_asset_preview_only_above_500():
 async def test_query_syntax_fields_are_independent_from_membership_limited_return_fields():
     client = ProfessionalTierClient()
 
-    run = await FofaAgent(client, FieldPermissionRouter()).run("find Example University content")
+    run = await AssetAgent(client, FieldPermissionRouter()).run("find Example University content")
 
     assert run.query == 'body="Example University"'
-    assert client.request.query == 'body="Example University"'
+    # The bundle's ownership pivot runs after the planner's query, so the planner's own request is
+    # the first one recorded.
+    assert client.requests[0].query == 'body="Example University"'
     assert "body" not in run.fields
     assert "host" in run.fields
     assert "product" in run.fields
@@ -1136,7 +1153,7 @@ async def test_empty_summarizer_text_falls_back_to_local_briefing():
                 return ModelResult(text="  ", model="m", provider="p", output_tokens=4096)
             return result
 
-    run = await FofaAgent(SuccessfulClient(), EmptySummaryRouter()).run("查找 harvard.edu")
+    run = await AssetAgent(SuccessfulClient(), EmptySummaryRouter()).run("查找 harvard.edu")
     assert run.state is AgentState.COMPLETED
     assert "## 结论" in run.summary
     assert "去重资产 1 条" in run.summary
@@ -1148,7 +1165,7 @@ async def test_empty_summarizer_text_falls_back_to_local_briefing():
 async def test_optional_reflection_failure_preserves_successful_asset_results():
     router = ReflectionFailureRouter()
 
-    run = await FofaAgent(BulkResultClient(1), router).run("find example.com")
+    run = await AssetAgent(BulkResultClient(1), router).run("find example.com")
 
     assert run.state is AgentState.COMPLETED
     assert run.error is None
@@ -1162,15 +1179,239 @@ async def test_optional_reflection_failure_preserves_successful_asset_results():
 
 @pytest.mark.asyncio
 async def test_agent_unconfigured_model_renders_where_to_fix_without_scan_panel(monkeypatch):
-    run = await FofaAgent(SuccessfulClient(), ProviderRouter(ProviderRegistry(Config()))).run("查找并扫描资产")
+    run = await AssetAgent(SuccessfulClient(), ProviderRouter(ProviderRegistry(Config()))).run("查找并扫描资产")
     assert run.state is AgentState.FAILED
     assert run.error["code"] == "model_provider_not_configured"
-    assert "fofamap init" in run.error["hint"]
+    assert "cybermap init" in run.error["hint"]
 
     stream = StringIO()
     monkeypatch.setattr(cli_ui, "console", Console(file=stream, width=140, color_system=None))
     cli_ui.render_agent(run)
     output = stream.getvalue()
-    assert "fofamap init" in output
+    assert "cybermap init" in output
     assert "配置文件位置" in output
     assert "扫描决策" not in output
+
+
+@pytest.mark.asyncio
+async def test_evidence_floor_drops_recall_rows_from_the_whole_run():
+    """`min_evidence` must filter while collecting, so counts, targets and briefing agree."""
+    from core.agent import AssetAgent, _scan_target
+    from core.scans import ScanPlanRequest
+
+    router = MultiQueryRouter()
+    client = MultiQueryClient()
+    run = await AssetAgent(client, router).run(
+        "收集 example.edu 资产", max_records=50, max_pages=3, min_evidence="balanced"
+    )
+    generous = await AssetAgent(MultiQueryClient(), MultiQueryRouter()).run(
+        "收集 example.edu 资产", max_records=50, max_pages=3
+    )
+
+    assert {asset["host"] for asset in generous.assets} == {
+        "https://a.example.edu",
+        "https://shared.example.edu",
+        "https://b.example.edu",
+        "https://c.example.edu",
+    }
+    # The recall round only contributed c.example.edu, which the floor removes.
+    assert {asset["host"] for asset in run.assets} == {
+        "https://a.example.edu",
+        "https://shared.example.edu",
+        "https://b.example.edu",
+    }
+    assert run.result_count == len(run.assets) == 3
+    assert "recall" not in run.evidence_counts
+    assert ScanPlanRequest(targets=[_scan_target(asset) for asset in run.assets], template_ids=["x"]).targets
+
+
+def test_scan_targets_keep_non_web_services_scheme_free():
+    from core.agent import _scan_target
+
+    assert _scan_target({"host": "https://www.example.com", "port": 443, "protocol": "https"}) == "https://www.example.com"
+    assert _scan_target({"host": "1.2.3.4:22", "ip": "1.2.3.4", "port": 22, "protocol": "ssh"}) == "1.2.3.4:22"
+    assert _scan_target({"host": "1.2.3.4:3389", "ip": "1.2.3.4", "port": 3389, "protocol": "tcp"}) == "1.2.3.4:3389"
+    assert _scan_target({"ip": "1.2.3.4", "port": 6379, "protocol": "redis"}) == "1.2.3.4:6379"
+    assert _scan_target({"host": "scanme.nmap.org", "port": 80, "protocol": "http"}) == "http://scanme.nmap.org"
+
+
+def test_probe_targets_leave_port_only_entries_to_nuclei():
+    from core.scanner import NucleiScanner
+
+    assert NucleiScanner._target("example.com") == "https://example.com"
+    assert NucleiScanner._target("https://example.com/a") == "https://example.com/a"
+    # Nuclei probes http(s) itself for a bare host:port, and network templates can match it.
+    assert NucleiScanner._target("1.2.3.4:22") == "1.2.3.4:22"
+    assert NucleiScanner._target(" example.com:8443 ") == "example.com:8443"
+
+
+class DomainPlanRouter(FakeRouter):
+    """Plans a host mention only, leaving the certificate pivot to the bundle."""
+
+    async def generate(self, task, **kwargs):
+        self.calls.append(task)
+        if task == "planner":
+            return ModelResult(
+                text="plan",
+                structured={
+                    "queries": [{"query": 'domain="example.com"', "purpose": "主域", "strategy": "precision"}],
+                    "fields": ["host", "ip", "port", "protocol", "title"],
+                    "scan": {"recommended": False},
+                },
+                model="m",
+                provider="p",
+            )
+        return ModelResult(text="## 结论\nok", model="m", provider="p")
+
+
+class DomainPlanClient:
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def iter_search(self, request):
+        self.queries.append(request.query)
+        records = [AssetRecord(values={"host": "https://example.com", "domain": "example.com"})]
+        yield SearchPage(query=request.query, fields=request.fields, records=records, total=1)
+
+
+@pytest.mark.asyncio
+async def test_playbook_pivot_is_injected_after_the_planner_queries():
+    client = DomainPlanClient()
+
+    run = await AssetAgent(client, DomainPlanRouter()).run("对 example.com 做资产梳理")
+
+    assert run.state is AgentState.COMPLETED
+    assert [item.query for item in run.queries] == ['domain="example.com"', 'cert="example.com"']
+    assert [item.source for item in run.queries] == ["planner", "playbook"]
+    # The pivot keeps the evidence tier it deserves and runs after the planner's own query.
+    assert run.queries[1].strategy == "balanced"
+    assert client.queries == ['domain="example.com"', 'cert="example.com"']
+    assert any("信息收集剧本" in step.detail for step in run.steps)
+
+
+class ProductiveReflectionRouter(FakeRouter):
+    """Two reflection rounds that both add assets."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reflection_calls = 0
+
+    async def generate(self, task, **kwargs):
+        self.calls.append(task)
+        if task == "planner":
+            return ModelResult(
+                text="plan",
+                structured={
+                    "queries": [{"query": 'domain="example.edu"', "purpose": "主域", "strategy": "precision"}],
+                    "fields": ["host", "ip", "port", "protocol", "title"],
+                    "scan": {"recommended": False},
+                },
+                model="m",
+                provider="p",
+            )
+        if task == "reflector":
+            self.reflection_calls += 1
+            return ModelResult(
+                text="reflection",
+                structured={
+                    "observation": f"round {self.reflection_calls}",
+                    "coverage_sufficient": False,
+                    "queries": [
+                        {
+                            "query": f'body="round-{self.reflection_calls}"',
+                            "purpose": "补充召回",
+                            "strategy": "recall",
+                        }
+                    ],
+                },
+                model="m",
+                provider="p",
+            )
+        return ModelResult(text="## 结论\nok", model="m", provider="p")
+
+
+class ProductiveReflectionClient:
+    async def iter_search(self, request):
+        tag = request.query.replace("body=", "").replace('"', "")
+        records = [AssetRecord(values={"host": f"https://{tag}.example.edu"})]
+        yield SearchPage(query=request.query, fields=request.fields, records=records, total=1)
+
+
+@pytest.mark.asyncio
+async def test_a_productive_reflection_round_still_uses_the_second_round():
+    """Measured regression: any run that had already found an asset stopped after round 1."""
+    run = await AssetAgent(ProductiveReflectionClient(), ProductiveReflectionRouter()).run(
+        "收集 example.edu 的公开资产"
+    )
+
+    assert run.state is AgentState.COMPLETED
+    assert run.reflection_rounds == 2
+    assert [item.source for item in run.queries] == ["planner", "playbook", "reflection_1", "reflection_2"]
+
+
+def test_asset_intents_receive_ownership_grading():
+    """An asset-collection intent deserves the same corroboration tiers a website intent gets."""
+    from core.agent import AgentRun, _derive_website_candidates
+    from core.agent_profiles import agent_profile
+
+    run = AgentRun(intent="收集某某大学的对外资产", engine="fofa", organization_names=["某某大学"])
+    run.assets = [{"host": "https://www.xxu.edu.cn", "domain": "xxu.edu.cn", "title": "某某大学门户"}]
+    run.asset_confidence = ["balanced"]
+
+    candidates = _derive_website_candidates(run, agent_profile(None))
+
+    assert [item.domain for item in candidates] == ["xxu.edu.cn"]
+    assert candidates[0].status in {"corroborated", "observed", "candidate"}
+
+
+class IcpSeedClient:
+    """First batch finds one asset carrying a filing number, which becomes the next pivot."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+
+    async def iter_search(self, request):
+        self.queries.append(request.query)
+        records = (
+            [AssetRecord(values={"host": "https://seed.example.com", "domain": "example.com", "ip": "45.33.32.10"})]
+            if request.query.startswith('domain="')
+            else []
+        )
+        yield SearchPage(query=request.query, fields=request.fields, records=records, total=len(records))
+
+
+@pytest.mark.asyncio
+async def test_derived_pivots_run_after_the_first_batch():
+    client = IcpSeedClient()
+
+    run = await AssetAgent(client, DomainPlanRouter()).run("对 example.com 做资产梳理")
+
+    sources = [item.source for item in run.queries]
+    assert sources[0] == "planner"
+    assert "pivot" in sources
+    # The asset's own domain is already covered by the planner's query, so the derived pivot is the
+    # netblock it sits in, and it ran after the first batch.
+    pivot = next(item for item in run.queries if item.source == "pivot")
+    assert pivot.query == 'ip="45.33.32.0/24"'
+    assert pivot.strategy == "recall"
+    assert any("派生" in step.detail for step in run.steps)
+    assert client.queries[-1] == pivot.query
+
+
+def test_briefing_stats_report_hosting_and_corroboration():
+    from core.agent import AgentRun, _asset_briefing_stats
+
+    run = AgentRun(intent="收集资产", engine="fofa")
+    run.assets = [
+        {"host": "https://a.example", "ip": "1.1.1.1", "org": "Cloudflare, Inc."},
+        {"host": "https://b.example", "ip": "45.33.32.10", "org": "Peking University"},
+    ]
+    run.result_count = 2
+    run.corroboration = {"multi_engine": 1, "single_engine": 1}
+
+    stats = _asset_briefing_stats(run)
+
+    assert stats["hosting_rows"] == 1
+    assert stats["hosting"] == [{"name": "Cloudflare", "count": 1}]
+    assert stats["corroboration"] == {"multi_engine": 1, "single_engine": 1}
+    assert stats["preview_limit"] == ASSET_PREVIEW_LIMIT

@@ -7,15 +7,16 @@ import pytest
 
 from core.client import FofaClient
 from core.models import FofaError, FofaErrorCode, SearchRequest
+from core.ratelimit import retry_after_seconds
 
 
 def test_retry_after_supports_seconds_http_dates_and_a_safe_cap():
     future = format_datetime(datetime.now(timezone.utc) + timedelta(seconds=5), usegmt=True)
 
-    assert FofaClient._retry_after_seconds("1.5", 0.5) == 1.5
-    assert 0 < FofaClient._retry_after_seconds(future, 0.5) <= 5
-    assert FofaClient._retry_after_seconds("999", 0.5) == 30
-    assert FofaClient._retry_after_seconds("invalid", 2.0) == 2.0
+    assert retry_after_seconds("1.5", 0.5) == 1.5
+    assert 0 < retry_after_seconds(future, 0.5) <= 5
+    assert retry_after_seconds("999", 0.5) == 30
+    assert retry_after_seconds("invalid", 2.0) == 2.0
 
 
 @pytest.mark.asyncio
@@ -242,3 +243,49 @@ async def test_start_page_uses_numbered_search_all_window():
     assert [record.values["host"] for page in pages for record in page.records] == ["p3", "p4"]
     assert [request.url.path for request in seen] == ["/api/v1/search/all", "/api/v1/search/all"]
     assert [request.url.params["page"] for request in seen] == ["3", "4"]
+
+
+@pytest.mark.asyncio
+async def test_expired_next_cursor_falls_back_to_numbered_pages():
+    """Some FOFA deployments reject the `next` cursor; the window must not be lost."""
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(f"{request.url.path}?{request.url.params.get('page') or request.url.params.get('next')}")
+        if request.url.path == "/api/v1/search/next" and request.url.params.get("next"):
+            return httpx.Response(200, json={"error": True, "errmsg": "[40070] 游标无效或过期"})
+        if request.url.path == "/api/v1/search/next":
+            return httpx.Response(200, json={"results": [["a"], ["b"]], "fields": "host", "next": "cursor-1", "size": 4})
+        return httpx.Response(200, json={"results": [["c"], ["d"]], "fields": "host", "size": 4})
+
+    client = FofaClient(
+        api_key="k", email="e", client=httpx.AsyncClient(transport=httpx.MockTransport(handler)), max_retries=0
+    )
+    async with client:
+        hosts = [
+            record.values["host"]
+            async for page in client.iter_search(SearchRequest(query='ip="1.1.1.1"', fields=["host"], size=100, max_pages=3))
+            for record in page.records
+        ]
+
+    assert hosts == ["a", "b", "c", "d"]
+    # The switch is visible in the page metadata so a caller can report it.
+    assert client.pagination_fallback is True
+    assert seen[0].startswith("/api/v1/search/next")
+    assert seen[1] == "/api/v1/search/next?cursor-1"
+    assert seen[2] == "/api/v1/search/all?2"  # numbered page 2 continues the window
+
+
+@pytest.mark.asyncio
+async def test_first_page_cursor_failure_stays_fatal():
+    client = FofaClient(
+        api_key="k",
+        email="e",
+        client=httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={"error": True, "errmsg": "[40070] 游标无效或过期"}))
+        ),
+        max_retries=0,
+    )
+    with pytest.raises(FofaError):
+        async with client:
+            [page async for page in client.iter_search(SearchRequest(query='ip="1.1.1.1"', fields=["host"], size=100))]

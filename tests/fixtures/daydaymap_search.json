@@ -1,0 +1,114 @@
+{
+ "code": 200,
+ "msg": "检索成功",
+ "data": {
+  "list": [
+   {
+    "asn": "AS4134",
+    "asn_org": "CHINANET-BACKBONE No.31",
+    "banner": "",
+    "cert": "06bf84aacf47ea341b5d3e981c7b67c3  2026-04-13T00:00:00.000000+8:00 2026-10-28T23:59:59.000000+8:00 C=US,O=DigiCert, Inc.,CN=GeoTrust G2 TLS CN RSA4096 SHA256 2022 CA1, C=CN,ST=北京市,O=远江盛邦安全科技集团股份有限公司,CN=daydaymap.com, 379ae42d579d85c0046622f732cb7494",
+    "cert_selfsigned": null,
+    "city": "海口市",
+    "continent": "亚洲",
+    "country": "中国",
+    "country_code": "CN",
+    "device": null,
+    "device_type": null,
+    "domain": "www.daydaymap.com",
+    "header": "HTTP/1.1 200 OK",
+    "icon_md5": null,
+    "icp_reg_name": "远江盛邦（北京）网络安全科技股份有限公司",
+    "industry": [],
+    "ip": "124.225.186.221",
+    "is_ipv6": false,
+    "is_website": true,
+    "isp": "中国电信",
+    "lang": "Node.js",
+    "latitude": 20.0473,
+    "longitude": 110.3715,
+    "manufacturer": null,
+    "os": null,
+    "port": 443,
+    "postal_code": null,
+    "product": [
+     "Kong Proxy",
+     "Nginx",
+     "Kong",
+     "Node.js",
+     "UmiJs"
+    ],
+    "protocol": "tcp",
+    "province": "海南省",
+    "server": "nginx",
+    "service": "https",
+    "ssl": {
+     "alternative_name": [
+      "DNS:daydaymap.com",
+      "DNS:www.daydaymap.com"
+     ],
+     "extended_key_usage": "TLSWebServerAuthentication,TLSWebClientAuthentication"
+    },
+    "tags": [
+     "企业专线",
+     "组织机构"
+    ],
+    "time_stamp": "2026-09-10T11:41:26.000000+08:00",
+    "title": "DayDayMap 网络空间资产测绘平台",
+    "url": "https://www.daydaymap.com"
+   },
+   {
+    "asn": "AS4134",
+    "asn_org": "CHINANET-BACKBONE No.31",
+    "banner": "",
+    "cert": null,
+    "cert_selfsigned": null,
+    "city": "海口市",
+    "continent": "亚洲",
+    "country": "中国",
+    "country_code": "CN",
+    "device": null,
+    "device_type": null,
+    "domain": "www.daydaymap.com",
+    "header": "HTTP/1.1 302 Moved Temporarily",
+    "icon_md5": null,
+    "icp_reg_name": "远江盛邦（北京）网络安全科技股份有限公司",
+    "industry": [],
+    "ip": "124.225.186.221",
+    "is_ipv6": false,
+    "is_website": true,
+    "isp": "中国电信",
+    "lang": "Node.js",
+    "latitude": 20.0473,
+    "longitude": 110.3715,
+    "manufacturer": null,
+    "os": null,
+    "port": 80,
+    "postal_code": null,
+    "product": [
+     "Kong Proxy",
+     "Nginx",
+     "Kong",
+     "Node.js",
+     "UmiJs"
+    ],
+    "protocol": "tcp",
+    "province": "海南省",
+    "server": "nginx",
+    "service": "http",
+    "ssl": {},
+    "tags": [
+     "企业专线",
+     "组织机构"
+    ],
+    "time_stamp": "2026-09-10T11:41:17.000000+08:00",
+    "title": "DayDayMap 网络空间资产测绘平台",
+    "url": "http://www.daydaymap.com"
+   }
+  ],
+  "page": 1,
+  "page_size": 2,
+  "total": 2019,
+  "use_time": "248"
+ }
+}

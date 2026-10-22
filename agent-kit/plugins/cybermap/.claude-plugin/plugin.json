@@ -1,0 +1,8 @@
+{
+  "name": "cybermap",
+  "version": "2.0.1",
+  "description": "CyberMap MCP server and Agent Skill for safe multi-engine asset research (FOFA, Shodan, Hunter, DayDayMap, Censys).",
+  "author": {
+    "name": "CyberMap"
+  }
+}

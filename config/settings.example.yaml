@@ -2,7 +2,40 @@ fofa:
   base_url: "https://fofa.info"
   # 密钥来自 FOFA_API_KEY / FOFA_EMAIL、系统钥匙串或容器密钥。
 
+shodan:
+  base_url: "https://api.shodan.io"
+  # 密钥来自 SHODAN_API_KEY、系统钥匙串（服务 cybermap-shodan，用户名 SHODAN_API_KEY）或容器密钥。
+  # Shodan 官方对所有套餐都限定 1 请求/秒，因此这里默认 1.0；设为 null 才跟随 system.requests_per_second。
+  requests_per_second: 1.0
+
+hunter:
+  base_url: "https://hunter.qianxin.com"
+  # 密钥来自 HUNTER_API_KEY、系统钥匙串（服务 cybermap-hunter，用户名 HUNTER_API_KEY）或容器密钥。
+  # Hunter 按返回条数扣积分；设为 null 才跟随 system.requests_per_second。
+  requests_per_second: 1.0
+
+daydaymap:
+  base_url: "https://www.daydaymap.com"
+  # Key 来自 DAYDAYMAP_API_KEY、系统钥匙串（服务 cybermap-daydaymap，用户名 DAYDAYMAP_API_KEY）或容器密钥。
+  # 开放 API 没有余额/统计/图标接口；语法为 field="value"，支持 &&、||、括号。
+  requests_per_second: 1.0
+
+censys:
+  base_url: "https://api.platform.censys.io"
+  # 令牌来自 CENSYS_API_TOKEN、系统钥匙串（服务 cybermap-censys，用户名 CENSYS_API_TOKEN）或容器密钥。
+  # Free 套餐只开放实体查询（主机画像 1 额度/次），没有 search/aggregate 接口；
+  # 因此 Censys 只适合 `-e censys -hq <IP>`，不参与 -e all 的列表检索。
+  requests_per_second: 1.0
+
+cache:
+  # 分页缓存：每次拿到的页立即写入 SQLite，中断后重跑同一请求不再扣额度。
+  enabled: true
+  ttl_hours: 24
+  max_entries: 5000
+  path: ""                     # 留空 = 当前目录 cybermap-cache.sqlite3
+
 search:
+  engine: fofa                 # 默认搜索引擎：fofa / shodan / hunter / daydaymap / censys；AI 模式可设 all 多引擎合并
   fields: "host,protocol,ip,port,title,domain,country"
   size: 100
   full: false
@@ -69,4 +102,4 @@ routing:
   fallbacks: []
 
 # 主动扫描仍由环境变量控制。命令行始终展示精确的目标 / 模板 / 严重级别方案并请求审批。
-# FOFAMAP_NUCLEI_ID_ALLOWLIST 可追加管理员批准的模板 ID。
+# CYBERMAP_NUCLEI_ID_ALLOWLIST 可追加管理员批准的模板 ID。

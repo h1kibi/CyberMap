@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import codecs
+import hashlib
 import ipaddress
 import socket
 from pathlib import Path
@@ -13,6 +14,7 @@ import httpx
 import mmh3
 
 from config import settings
+from core.models import IconDigest
 from utils.logger import logger
 
 # Clash / Surge / Quantumult X fake-ip (RFC 2544 benchmarking range). Python marks
@@ -86,28 +88,40 @@ async def _get_with_safe_redirects(client: httpx.AsyncClient, url: str) -> httpx
 
 
 class IconHashCalculator:
+    """Favicon digesting for every engine.
+
+    The engines disagree on the hash: FOFA `icon_hash=` and Shodan `http.favicon.hash:` both use
+    the MurmurHash3 of the base64-encoded icon, while Hunter `web.icon=` uses the MD5 of the icon
+    file itself. Both digests therefore come from one read of the bytes and each engine renders
+    its own query syntax from the `IconDigest`.
+    """
+
     MAX_ICON_BYTES = 4 * 1024 * 1024
 
     @staticmethod
-    def from_bytes(content: bytes) -> str:
+    def hash_bytes(content: bytes) -> IconDigest:
         if not content:
             raise ValueError("图标内容为空")
         if len(content) > IconHashCalculator.MAX_ICON_BYTES:
             raise ValueError("图标文件超过 4 MiB 安全上限")
-        icon_hash = mmh3.hash(codecs.lookup("base64").encode(content)[0])
-        return f'icon_hash="{icon_hash}"'
+        return IconDigest(
+            # Hunter filters on MD5 of the icon file; this is a data fingerprint, not a
+            # security primitive, hence usedforsecurity=False.
+            md5=hashlib.md5(content, usedforsecurity=False).hexdigest(),
+            murmur3=mmh3.hash(codecs.lookup("base64").encode(content)[0]),
+        )
 
     @staticmethod
-    def from_file(path_value: str) -> str:
+    def hash_file(path_value: str) -> IconDigest:
         path = Path(path_value).expanduser()
         if not path.is_file():
             raise ValueError(f"图标文件不存在：{path}")
         if path.stat().st_size > IconHashCalculator.MAX_ICON_BYTES:
             raise ValueError("图标文件超过 4 MiB 安全上限")
-        return IconHashCalculator.from_bytes(path.read_bytes())
+        return IconHashCalculator.hash_bytes(path.read_bytes())
 
     @staticmethod
-    async def get_hash(url: str) -> str | None:
+    async def hash_url(url: str) -> IconDigest | None:
         safe_url = assert_public_http_url(url)
         parsed = urlparse(safe_url)
         explicit_icon = Path(parsed.path).suffix.lower() in {".ico", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp"}
@@ -115,7 +129,7 @@ class IconHashCalculator:
         async with httpx.AsyncClient(verify=True, timeout=10, follow_redirects=False) as client:
             try:
                 response = await _get_with_safe_redirects(client, favicon_url)
-                return IconHashCalculator.from_bytes(response.content)
+                return IconHashCalculator.hash_bytes(response.content)
             except (httpx.HTTPError, ValueError) as exc:
                 logger.warning(f"图标计算失败: {exc}")
                 return None

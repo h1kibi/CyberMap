@@ -1,0 +1,849 @@
+{
+ "result": {
+  "resource": {
+   "ip": "1.1.1.1",
+   "location": {
+    "continent": "Oceania",
+    "country": "Australia",
+    "country_code": "AU",
+    "city": "Brisbane",
+    "postal_code": "9010",
+    "timezone": "Australia/Brisbane",
+    "province": "Queensland",
+    "coordinates": {
+     "latitude": -27.4679,
+     "longitude": 153.0281
+    }
+   },
+   "autonomous_system": {
+    "asn": 13335,
+    "description": "CLOUDFLARENET - Cloudflare, Inc.",
+    "bgp_prefix": "1.1.1.0/24",
+    "name": "CLOUDFLARENET - Cloudflare, Inc.",
+    "country_code": "US"
+   },
+   "whois": {
+    "network": {
+     "handle": "APNIC-LABS",
+     "name": "APNIC and Cloudflare DNS Resolver project",
+     "cidrs": [
+      "1.1.1.0/24"
+     ],
+     "updated": "2023-04-26T00:00:00Z"
+    },
+    "organization": {
+     "handle": "ORG-ARAD1-AP",
+     "name": "APNIC Research and Development",
+     "address": "********",
+     "country": "AU"
+    }
+   },
+   "dns": {
+    "names": [
+     "0.000000000000000.invox.ipv64.de",
+     "0.00000000000000000000000000000000.invox.ipv64.de",
+     "0.00000000000000000000000000000000000.invox.ipv64.de"
+    ],
+    "reverse_dns": {
+     "names": [
+      "one.one.one.one"
+     ]
+    }
+   },
+   "service_count": 17,
+   "services": [
+    {
+     "ip": "1.1.1.1",
+     "port": 53,
+     "protocol": "DNS",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T20:45:17Z"
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 53,
+     "protocol": "DNS",
+     "transport_protocol": "udp",
+     "scan_time": "2026-10-21T21:31:08Z"
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 80,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T00:40:41Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      },
+      {
+       "vendor": "fontawesome",
+       "product": "font_awesome"
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 80,
+       "path": "/",
+       "scan_time": "2026-10-22T00:40:41Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 443,
+     "protocol": "UNKNOWN",
+     "transport_protocol": "quic",
+     "scan_time": "2026-10-22T11:36:37Z"
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 443,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T09:49:27Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 443,
+       "path": "/",
+       "scan_time": "2026-10-22T09:49:27Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 853,
+     "protocol": "DNS",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T10:31:43Z"
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2052,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T21:48:23Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2052,
+       "path": "/",
+       "scan_time": "2026-10-21T21:48:23Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:2052/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2053,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T06:15:49Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2053,
+       "path": "/",
+       "scan_time": "2026-10-22T06:15:49Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1:2053/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2082,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T19:53:18Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2082,
+       "path": "/",
+       "scan_time": "2026-10-21T19:53:18Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:2082/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2083,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T09:05:07Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2083,
+       "path": "/",
+       "scan_time": "2026-10-22T09:05:07Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1:2083/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2086,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T09:05:43Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2086,
+       "path": "/",
+       "scan_time": "2026-10-22T09:05:43Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:2086/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2087,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T17:03:57Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2087,
+       "path": "/",
+       "scan_time": "2026-10-21T17:03:57Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1:2087/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2095,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T09:06:33Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2095,
+       "path": "/",
+       "scan_time": "2026-10-22T09:06:33Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:2095/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 2096,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T00:10:04Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 2096,
+       "path": "/",
+       "scan_time": "2026-10-22T00:10:04Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1:2096/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 8080,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-22T09:49:27Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 8080,
+       "path": "/",
+       "scan_time": "2026-10-22T09:49:27Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:8080/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 8443,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T17:59:02Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 8443,
+       "path": "/",
+       "scan_time": "2026-10-21T17:59:02Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "https://1.1.1.1:8443/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "headers": {
+         "Location": {
+          "headers": [
+           "https://one.one.one.one/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    },
+    {
+     "ip": "1.1.1.1",
+     "port": 8880,
+     "protocol": "HTTP",
+     "transport_protocol": "tcp",
+     "scan_time": "2026-10-21T22:50:40Z",
+     "labels": [
+      {
+       "value": "WAF"
+      }
+     ],
+     "software": [
+      {
+       "vendor": "cloudflare",
+       "product": "cloudflare_load_balancer"
+      },
+      {
+       "vendor": "cloudflare",
+       "product": "waf",
+       "type": [
+        "WAF"
+       ]
+      }
+     ],
+     "endpoints": [
+      {
+       "endpoint_type": "HTTP",
+       "hostname": "1.1.1.1",
+       "port": 8880,
+       "path": "/",
+       "scan_time": "2026-10-21T22:50:40Z",
+       "transport_protocol": "tcp",
+       "http": {
+        "uri": "http://1.1.1.1:8880/",
+        "protocol": "HTTP/1.1",
+        "status_code": 301,
+        "status_reason": "Moved Permanently",
+        "html_title": "301 Moved Permanently",
+        "html_tags": [
+         "<title>301 Moved Permanently</title>"
+        ],
+        "body_size": 167,
+        "headers": {
+         "Content-Type": {
+          "headers": [
+           "text/html"
+          ]
+         },
+         "Location": {
+          "headers": [
+           "https://1.1.1.1/"
+          ]
+         },
+         "Server": {
+          "headers": [
+           "cloudflare"
+          ]
+         }
+        }
+       }
+      }
+     ]
+    }
+   ]
+  }
+ }
+}
